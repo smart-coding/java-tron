@@ -406,7 +406,7 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
             fetchCount.incrementAndGet();
             peer.getAdvObjWeRequested()
               .put(idToFetch.getKey(), Time.getCurrentMillis());
-            if (count.incrementAndGet() > 500){
+            if (count.incrementAndGet() > 1000){
               return;
             }
           }));
