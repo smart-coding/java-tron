@@ -7,12 +7,17 @@ import static org.tron.protos.Protocol.Transaction.Contract.ContractType.Transfe
 
 import com.carrotsearch.sizeof.RamUsageEstimator;
 import com.google.common.collect.Lists;
+import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import javafx.util.Pair;
@@ -59,6 +64,7 @@ import org.tron.core.exception.ValidateBandwidthException;
 import org.tron.core.exception.ValidateScheduleException;
 import org.tron.core.exception.ValidateSignatureException;
 import org.tron.core.witness.WitnessController;
+import org.tron.protos.Contract;
 import org.tron.protos.Protocol.AccountType;
 import org.tron.protos.Protocol.Transaction;
 
@@ -440,6 +446,62 @@ public class Manager {
     } catch (RevokingStoreIllegalStateException e) {
       logger.debug(e.getMessage(), e);
     }
+    return true;
+  }
+
+  public boolean pushTransactions1(final TransactionCapsule trx)
+      throws ValidateSignatureException, ContractValidateException, ContractExeException,
+      ValidateBandwidthException, DupTransactionException, TaposException {
+    logger.info("push transaction");
+
+    if (getTransactionStore().get(trx.getTransactionId().getBytes()) != null) {
+      logger.debug(getTransactionStore().get(trx.getTransactionId().getBytes()).toString());
+      throw new DupTransactionException("dup trans");
+    }
+
+    if (!trx.validateSignature()) {
+      throw new ValidateSignatureException("trans sig validate failed");
+    }
+    consumeBandwidth(trx);
+
+    //validateTapos(trx);
+
+    TraderGroup group = null;
+
+    synchronized (this) {
+      group = dispatchTrader(trx);
+    }
+
+    if (group != null) {
+      synchronized (group) {
+        if (!dialog.valid()) {
+          dialog.setValue(revokingStore.buildDialog());
+          try (RevokingStore.Dialog tmpDialog = revokingStore.buildDialog()) {
+            processTransaction(trx);
+            pendingTransactions.add(trx);
+            tmpDialog.merge();
+          } catch (RevokingStoreIllegalStateException e) {
+            logger.debug(e.getMessage(), e);
+          }
+        }
+        group.delete(trx);
+        if (group.isEmpty()) {
+          traderGroups.remove(group);
+        }
+      }
+    } else {
+      if (!dialog.valid()) {
+        dialog.setValue(revokingStore.buildDialog());
+        try (RevokingStore.Dialog tmpDialog = revokingStore.buildDialog()) {
+          processTransaction(trx);
+          pendingTransactions.add(trx);
+          tmpDialog.merge();
+        } catch (RevokingStoreIllegalStateException e) {
+          logger.debug(e.getMessage(), e);
+        }
+      }
+    }
+
     return true;
   }
 
@@ -1103,5 +1165,165 @@ public class Manager {
     } finally {
       System.err.println("******** end to close " + database.getName() + " ********");
     }
+  }
+
+  static public class TraderGroup {
+
+    @Getter
+    Set<ByteString> traders;
+    Map<ByteString, Integer> fromCountMap;
+    Map<ByteString, Integer> toCountMap;
+
+    public static final int NON = 0;
+    public static final int FROM = 1;
+    public static final int TO = 2;
+
+    public boolean isEmpty() {
+      return traders.isEmpty();
+    }
+
+    public TraderGroup(ByteString from, ByteString to) {
+      traders = new HashSet<>();
+      fromCountMap = new HashMap<>();
+      toCountMap = new HashMap<>();
+      add(from, to);
+    }
+
+    public int contains(ByteString from, ByteString to) {
+      if (traders.contains(from)) {
+        return FROM;
+      }
+      if (traders.contains(to)) {
+        return TO;
+      }
+      return NON;
+    }
+
+    public void add(ByteString from, ByteString to) {
+      traders.add(from);
+      traders.add(to);
+
+      fromCountMap.put(from, fromCountMap.getOrDefault(from, 0) + 1);
+      toCountMap.put(to, toCountMap.getOrDefault(to, 0) + 1);
+    }
+
+    public void delete(ByteString from, ByteString to) {
+      fromCountMap.put(from, fromCountMap.get(from) - 1);
+      toCountMap.put(to, toCountMap.get(to) - 1);
+      if (fromCountMap.get(from) == 0) {
+        traders.remove(from);
+      }
+
+      if (toCountMap.get(to) == 0) {
+        traders.remove(to);
+      }
+    }
+
+    public void merge(TraderGroup group, ByteString from, ByteString to) {
+      traders.addAll(group.getTraders());
+      add(from, to);
+    }
+
+    public void delete(TransactionCapsule trx) {
+      List<org.tron.protos.Protocol.Transaction.Contract> contracts =
+          trx.getInstance().getRawData().getContractList();
+
+      for (Transaction.Contract contract : contracts) {
+        Any contractParameter = contract.getParameter();
+
+        ByteString from = null, to = null;
+        try {
+          switch (contract.getType()) {
+            case TransferContract:
+              from = contractParameter.unpack(Contract.TransferContract.class)
+                  .getOwnerAddress();
+              to = contractParameter.unpack(Contract.TransferContract.class).getToAddress();
+              break;
+            case TransferAssetContract:
+              from = contractParameter.unpack(Contract.TransferContract.class)
+                  .getOwnerAddress();
+              to = contractParameter.unpack(Contract.TransferContract.class).getToAddress();
+              break;
+            default:
+              return;
+          }
+        } catch (InvalidProtocolBufferException e) {
+          e.printStackTrace();
+        }
+
+        delete(from, to);
+      }
+    }
+  }
+
+
+  List<TraderGroup> traderGroups = new LinkedList<>();
+
+  private TraderGroup dispatchTrader(final TransactionCapsule trx) {
+
+    List<org.tron.protos.Protocol.Transaction.Contract> contracts =
+        trx.getInstance().getRawData().getContractList();
+
+    for (Transaction.Contract contract : contracts) {
+      Any contractParameter = contract.getParameter();
+
+      ByteString from = null, to = null;
+
+      try {
+        switch (contract.getType()) {
+          case TransferContract:
+            from = contractParameter.unpack(Contract.TransferContract.class)
+                .getOwnerAddress();
+            to = contractParameter.unpack(Contract.TransferContract.class).getToAddress();
+            break;
+          case TransferAssetContract:
+            from = contractParameter.unpack(Contract.TransferContract.class)
+                .getOwnerAddress();
+            to = contractParameter.unpack(Contract.TransferContract.class).getToAddress();
+            break;
+          default:
+            return null;
+        }
+      } catch (InvalidProtocolBufferException e) {
+        e.printStackTrace();
+      }
+//      List<TraderGroup> containGroup = new ArrayList<>(2);
+      int ret = TraderGroup.NON;
+      TraderGroup[] containGroup = new TraderGroup[2];
+      for (TraderGroup group : traderGroups) {
+        ret = group.contains(from, to);
+        if (ret == TraderGroup.NON) {
+          continue;
+        }
+        if (ret == TraderGroup.FROM) {
+          containGroup[0] = group;
+        }
+        if (ret == TraderGroup.TO) {
+          containGroup[1] = group;
+        }
+      }
+
+      if (ret == TraderGroup.NON) {
+        traderGroups.add(new TraderGroup(from, to));
+      }
+
+      if (containGroup[0] != null && containGroup[1] != null) {
+        containGroup[0].merge(containGroup[1], from, to);
+        traderGroups.remove(containGroup[1]);
+        return containGroup[0];
+      }
+
+      if (ret == TraderGroup.FROM) {
+        containGroup[0].add(from, to);
+        return containGroup[0];
+
+      }
+
+      if (ret == TraderGroup.TO) {
+        containGroup[1].add(from, to);
+        return containGroup[1];
+      }
+    }
+    return null;
   }
 }
