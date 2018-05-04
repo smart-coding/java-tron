@@ -411,7 +411,7 @@ public class Manager {
 
     //validateTapos(trx);
         
-    validateFreq(trx);
+    //validateFreq(trx);
 
     if (!dialog.valid()) {
       dialog.setValue(revokingStore.buildDialog());

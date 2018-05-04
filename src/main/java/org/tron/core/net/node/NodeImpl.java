@@ -27,6 +27,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import javafx.util.Pair;
 import lombok.extern.slf4j.Slf4j;
@@ -197,6 +199,8 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
 
   private boolean isFetchSyncActive = false;
 
+  AtomicLong trxCount = new AtomicLong(0);
+  AtomicLong invCount = new AtomicLong(0);
   @Override
   public void onMessage(PeerConnection peer, TronMessage msg) {
     logger.info("Handle Message: " + msg + " from \nPeer: " + peer);
@@ -205,6 +209,10 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
         onHandleBlockMessage(peer, (BlockMessage) msg);
         break;
       case TRX:
+        long count = trxCount.incrementAndGet();
+        if(count % 100 == 0) {
+          logger.info("huzhenyuan trxCount {}", trxCount);
+        }
         onHandleTransactionMessage(peer, (TransactionMessage) msg);
         break;
       case SYNC_BLOCK_CHAIN:
@@ -371,7 +379,9 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
     }, 10, 1, TimeUnit.SECONDS);
   }
 
+  static AtomicLong fetchCount = new AtomicLong(0);
   private void consumerAdvObjToFetch() {
+    long begin = System.currentTimeMillis();
     if (advObjToFetch.isEmpty()) {
       try {
         Thread.sleep(100);
@@ -380,23 +390,37 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
         logger.debug(e.getMessage(), e);
       }
     }
+    AtomicInteger count = new AtomicInteger(0);
     Collection<PeerConnection> filterActivePeer = getActivePeer().stream()
-        .filter(peer -> !peer.isBusy()).collect(Collectors.toList());
+      .filter(peer -> !peer.isBusy()).collect(Collectors.toList());
     if (filterActivePeer.size() > 0) {
       InvToSend sendPackage = new InvToSend();
       advObjToFetch.entrySet()
-          .forEach(idToFetch -> filterActivePeer.stream()
-              .filter(peer -> peer.getAdvObjSpreadToUs().containsKey(idToFetch.getKey()))
-              .findFirst()
-              .ifPresent(peer -> {
-                //TODO: don't fetch too much obj from only one peer
-                sendPackage.add(idToFetch, peer);
-                advObjToFetch.remove(idToFetch.getKey());
-                peer.getAdvObjWeRequested()
-                    .put(idToFetch.getKey(), Time.getCurrentMillis());
-              }));
+        .forEach(idToFetch -> filterActivePeer.stream()
+          .filter(peer -> peer.getAdvObjSpreadToUs().containsKey(idToFetch.getKey()))
+          .findFirst()
+          .ifPresent(peer -> {
+            //TODO: don't fetch too much obj from only one peer
+            sendPackage.add(idToFetch, peer);
+            advObjToFetch.remove(idToFetch.getKey());
+            fetchCount.incrementAndGet();
+            peer.getAdvObjWeRequested()
+              .put(idToFetch.getKey(), Time.getCurrentMillis());
+            if (count.incrementAndGet() > 500){
+              return;
+            }
+          }));
       sendPackage.sendFetch();
+    } else {
+      logger.error("huzhenyuan filterActivePeer is null");
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        e.printStackTrace();
+      }
     }
+    long end = System.currentTimeMillis();
+    logger.error("huzhenyuan time cost:{}, fetchCount:{}", (end-begin), fetchCount);
   }
 
   private void consumerAdvObjToSpread() {
@@ -564,6 +588,10 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
           //TODO: make a error cache here, Don't handle error TRX or BLK repeatedly.
           if (!badAdvObj.containsKey(id)) {
             this.advObjToFetch.put(id, msg.getInventoryType());
+            invCount.incrementAndGet();
+            if(invCount.get() % 100 ==0) {
+              logger.error("huzhenyuan invCount:{}", invCount);
+            }
           }
         }
       }
