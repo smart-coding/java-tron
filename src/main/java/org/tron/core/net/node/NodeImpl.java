@@ -820,6 +820,7 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
     peer.sendMessage(new ChainInventoryMessage(blockIds, remainNum));
   }
 
+  static AtomicLong receivedFetchCount = new AtomicLong(0);
   private void onHandleFetchDataMessage(PeerConnection peer, FetchInvDataMessage fetchInvDataMsg) {
     logger.info("on handle fetch block message");
     MessageTypes type = fetchInvDataMsg.getInvMessageType();
@@ -827,6 +828,8 @@ public class NodeImpl extends PeerConnectionDelegate implements Node {
     //TODO:maybe can use message cache here
     BlockCapsule block = null;
     //get data and send it one by one
+    receivedFetchCount.addAndGet( fetchInvDataMsg.getHashList().size());
+    logger.error("huzhenyuan receivedFetchCount:{}", receivedFetchCount);
     for (Sha256Hash hash : fetchInvDataMsg.getHashList()) {
 
       Message msg;

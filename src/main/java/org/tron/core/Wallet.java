@@ -21,6 +21,7 @@ package org.tron.core;
 import com.google.protobuf.ByteString;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -205,12 +206,18 @@ public class Wallet {
   /**
    * Broadcast a transaction.
    */
+  static AtomicLong sentTxCount = new AtomicLong(0);
   public boolean broadcastTransaction(Transaction signaturedTransaction) {
     TransactionCapsule trx = new TransactionCapsule(signaturedTransaction);
     try {
       Message message = new TransactionMessage(signaturedTransaction);
       dbManager.pushTransactions(trx);
       p2pNode.broadcast(message);
+      sentTxCount.incrementAndGet();
+      if(sentTxCount.get()% 100 == 0) {
+        logger.error("huzhenyuan sentTxCount:{}", sentTxCount);
+      }
+
       return true;
     } catch (ValidateSignatureException e) {
       logger.debug(e.getMessage(), e);

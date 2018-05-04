@@ -397,7 +397,7 @@ public class Manager {
   public synchronized boolean pushTransactions(final TransactionCapsule trx)
       throws ValidateSignatureException, ContractValidateException, ContractExeException,
       HighFreqException, DupTransactionException, TaposException {
-    logger.info("push transaction");
+//    logger.info("push transaction");
 
     if (getTransactionStore().get(trx.getTransactionId().getBytes()) != null) {
       logger.debug(getTransactionStore().get(trx.getTransactionId().getBytes()).toString());
@@ -411,7 +411,7 @@ public class Manager {
 
     //validateTapos(trx);
         
-    //validateFreq(trx);
+//    validateFreq(trx);
 
     if (!dialog.valid()) {
       dialog.setValue(revokingStore.buildDialog());
