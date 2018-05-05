@@ -21,7 +21,6 @@ package org.tron.common.overlay.discover;
 import static java.lang.Math.min;
 
 import java.util.concurrent.atomic.AtomicLong;
-
 import org.tron.common.overlay.message.ReasonCode;
 
 public class NodeStatistics {
@@ -92,7 +91,7 @@ public class NodeStatistics {
     int discoverReput = 0;
 
     discoverReput +=
-            min(discoverInPong.get(), 1) * (discoverOutPing.get() == discoverInPong.get() ? 50 : 1);
+        min(discoverInPong.get(), 1) * (discoverOutPing.get() == discoverInPong.get() ? 101 : 1);
     discoverReput += min(discoverInNeighbours.get(), 10) * 10;
     discoverReput += min(discoverInFind.get(), 50);
 
@@ -117,11 +116,12 @@ public class NodeStatistics {
         }
       }
     }
-    return discoverReput + 10 * reput;
+    int score = discoverReput + 10 * reput - disconnectTimes * 50;
+    return score > 0 ? score : 0;
   }
 
   public int getReputation() {
-    return isReputationPenalized() ? 0 : persistedReputation / 2 + getSessionReputation();
+    return isReputationPenalized() ? 0 : persistedReputation / 5 + getSessionReputation();
   }
 
   public ReasonCode getDisconnectReason() {
