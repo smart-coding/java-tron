@@ -140,6 +140,7 @@ public class ChannelManager {
     peer.disconnect(reason);
     InetSocketAddress socketAddress = (InetSocketAddress)peer.getChannelHandlerContext().channel().remoteAddress();
     recentlyDisconnected.put(socketAddress.getAddress(), new Date());
+    peer.nodeStatistics.setPersistedReputation(0);
   }
 
   public void notifyDisconnect(Channel channel) {
@@ -149,6 +150,7 @@ public class ChannelManager {
     InetSocketAddress socketAddress = (InetSocketAddress) channel.getChannelHandlerContext()
         .channel().remoteAddress();
     recentlyDisconnected.put(socketAddress.getAddress(), new Date());
+    channel.nodeStatistics.setPersistedReputation(0);
   }
 
   public boolean isRecentlyDisconnected(InetAddress peerAddr) {
