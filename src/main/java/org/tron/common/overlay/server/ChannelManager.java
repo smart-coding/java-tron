@@ -144,6 +144,9 @@ public class ChannelManager {
   }
 
   public void notifyDisconnect(Channel channel) {
+    if (channel == null) {
+      return;
+    }
     syncPool.onDisconnect(channel);
     activePeers.values().remove(channel);
     newPeers.remove(channel);
