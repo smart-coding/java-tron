@@ -27,6 +27,7 @@ public class NodeStatistics {
 
   public final static int REPUTATION_PREDEFINED = 100000;
   public final static long TOO_MANY_PEERS_PENALIZE_TIMEOUT = 60 * 1000;
+  public static final int CLEAR_CYCLE_TIME = 2 * 60 * 60 * 1000;
 
   public class StatHandler {
 
@@ -146,7 +147,13 @@ public class NodeStatistics {
       return true;
     }
 
-    return tronLastLocalDisconnectReason == ReasonCode.NULL_IDENTITY ||
+    if (lastDisconnectedTime > 0
+        && (System.currentTimeMillis() - lastDisconnectedTime) > CLEAR_CYCLE_TIME) {
+      tronLastLocalDisconnectReason = null;
+      tronLastRemoteDisconnectReason = null;
+    }
+
+    if (tronLastLocalDisconnectReason == ReasonCode.NULL_IDENTITY ||
         tronLastRemoteDisconnectReason == ReasonCode.NULL_IDENTITY ||
         tronLastLocalDisconnectReason == ReasonCode.INCOMPATIBLE_PROTOCOL ||
         tronLastRemoteDisconnectReason == ReasonCode.INCOMPATIBLE_PROTOCOL ||
@@ -163,7 +170,11 @@ public class NodeStatistics {
         tronLastLocalDisconnectReason == ReasonCode.INCOMPATIBLE_VERSION ||
         tronLastRemoteDisconnectReason == ReasonCode.INCOMPATIBLE_VERSION ||
         tronLastLocalDisconnectReason == ReasonCode.INCOMPATIBLE_CHAIN ||
-        tronLastRemoteDisconnectReason == ReasonCode.INCOMPATIBLE_CHAIN;
+        tronLastRemoteDisconnectReason == ReasonCode.INCOMPATIBLE_CHAIN) {
+      persistedReputation = 0;
+      return true;
+    }
+    return false;
   }
 
   public boolean isPenalized() {
