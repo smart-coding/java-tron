@@ -415,7 +415,7 @@ public class Manager {
   /**
    * push transaction into db.
    */
-  public synchronized boolean pushTransactions(final TransactionCapsule trx)
+  public synchronized boolean pushTransactions1(final TransactionCapsule trx)
       throws ValidateSignatureException, ContractValidateException, ContractExeException,
       ValidateBandwidthException, DupTransactionException, TaposException {
     logger.info("push transaction");
@@ -449,15 +449,23 @@ public class Manager {
     return true;
   }
 
-  public boolean pushTransactions1(final TransactionCapsule trx)
+  public boolean pushTransactions(final TransactionCapsule trx)
       throws ValidateSignatureException, ContractValidateException, ContractExeException,
       ValidateBandwidthException, DupTransactionException, TaposException {
-    logger.info("push transaction");
+    logger.error("ysc worker 0 " + Thread.currentThread().getId());
+//    logger.info("ysc push transaction " + Thread.currentThread().getId());
 
     if (getTransactionStore().get(trx.getTransactionId().getBytes()) != null) {
       logger.debug(getTransactionStore().get(trx.getTransactionId().getBytes()).toString());
       throw new DupTransactionException("dup trans");
     }
+
+//    long sleep = (long) (1000 * Math.random());
+//    try {
+//      Thread.sleep(sleep);
+//    } catch (InterruptedException e) {
+//      e.printStackTrace();
+//    }
 
     if (!trx.validateSignature()) {
       throw new ValidateSignatureException("trans sig validate failed");
@@ -465,15 +473,33 @@ public class Manager {
     consumeBandwidth(trx);
 
     //validateTapos(trx);
+//    synchronized (this) {
+//
+//      if (!dialog.valid()) {
+//        dialog.setValue(revokingStore.buildDialog());
+//      }
+//
+//      try (RevokingStore.Dialog tmpDialog = revokingStore.buildDialog()) {
+//        processTransaction(trx);
+//        pendingTransactions.add(trx);
+//        tmpDialog.merge();
+//      } catch (RevokingStoreIllegalStateException e) {
+//        logger.debug(e.getMessage(), e);
+//      }
+//    }
 
     TraderGroup group = null;
 
-    synchronized (this) {
-      group = dispatchTrader(trx);
-    }
+    logger.error("ysc worker 1 " + Thread.currentThread().getId());
+//    synchronized (this) {
+//      group = dispatchTrader(trx);
+//      logger.error("ysc worker 2 " + Thread.currentThread().getId());
+//    }
+    logger.error("ysc worker 3 " + Thread.currentThread().getId());
 
     if (group != null) {
       synchronized (group) {
+        logger.error("ysc worker 4 " + Thread.currentThread().getId());
         if (!dialog.valid()) {
           dialog.setValue(revokingStore.buildDialog());
           try (RevokingStore.Dialog tmpDialog = revokingStore.buildDialog()) {
@@ -484,12 +510,15 @@ public class Manager {
             logger.debug(e.getMessage(), e);
           }
         }
+        logger.error("ysc worker 5 " + Thread.currentThread().getId());
         group.delete(trx);
         if (group.isEmpty()) {
           traderGroups.remove(group);
         }
+        logger.error("ysc worker 6 " + Thread.currentThread().getId());
       }
     } else {
+      logger.error("ysc worker 4 " + Thread.currentThread().getId());
       if (!dialog.valid()) {
         dialog.setValue(revokingStore.buildDialog());
         try (RevokingStore.Dialog tmpDialog = revokingStore.buildDialog()) {
@@ -500,7 +529,11 @@ public class Manager {
           logger.debug(e.getMessage(), e);
         }
       }
+      logger.error("ysc worker 5 " + Thread.currentThread().getId());
+      logger.error("ysc worker 6 " + Thread.currentThread().getId());
     }
+
+//    logger.error("ysc worker 6 " + Thread.currentThread().getId());
 
     return true;
   }
@@ -1177,6 +1210,7 @@ public class Manager {
     public static final int NON = 0;
     public static final int FROM = 1;
     public static final int TO = 2;
+    public static final int BOTH = 3;
 
     public boolean isEmpty() {
       return traders.isEmpty();
@@ -1190,6 +1224,10 @@ public class Manager {
     }
 
     public int contains(ByteString from, ByteString to) {
+      if (traders.contains(from) && traders.contains(to)) {
+        return BOTH;
+      }
+
       if (traders.contains(from)) {
         return FROM;
       }
@@ -1256,8 +1294,7 @@ public class Manager {
     }
   }
 
-
-  List<TraderGroup> traderGroups = new LinkedList<>();
+  List<TraderGroup> traderGroups = Collections.synchronizedList(new LinkedList<>());
 
   private TraderGroup dispatchTrader(final TransactionCapsule trx) {
 
@@ -1301,10 +1338,17 @@ public class Manager {
         if (ret == TraderGroup.TO) {
           containGroup[1] = group;
         }
+
+        if (ret == TraderGroup.BOTH) {
+          group.add(from, to);
+          return group;
+        }
       }
 
       if (ret == TraderGroup.NON) {
-        traderGroups.add(new TraderGroup(from, to));
+        TraderGroup group = new TraderGroup(from, to);
+        traderGroups.add(group);
+        return group;
       }
 
       if (containGroup[0] != null && containGroup[1] != null) {

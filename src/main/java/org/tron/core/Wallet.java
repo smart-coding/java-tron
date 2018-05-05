@@ -209,6 +209,7 @@ public class Wallet {
     TransactionCapsule trx = new TransactionCapsule(signaturedTransaction);
     try {
       Message message = new TransactionMessage(signaturedTransaction);
+      logger.error("ysc worker -1 " + Thread.currentThread().getId() + " broadcastTransaction");
       dbManager.pushTransactions(trx);
       p2pNode.broadcast(message);
       return true;

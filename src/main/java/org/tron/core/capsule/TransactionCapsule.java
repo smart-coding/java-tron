@@ -36,9 +36,7 @@ import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.Wallet;
 import org.tron.core.db.AccountStore;
-import org.tron.core.exception.ValidateBandwidthException;
 import org.tron.core.exception.ValidateSignatureException;
-import org.tron.protos.Contract.AccountUpdateContract;
 import org.tron.protos.Contract.AccountCreateContract;
 import org.tron.protos.Contract.FreezeBalanceContract;
 import org.tron.protos.Contract.ParticipateAssetIssueContract;
@@ -216,6 +214,13 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     ECDSASignature signature = ecKey.sign(getRawHash().getBytes());
     ByteString sig = ByteString.copyFrom(signature.toBase64().getBytes());
     this.transaction = this.transaction.toBuilder().addSignature(sig).build();
+  }
+
+  public boolean isMutualTransaction() {
+
+    return true;
+//    for (Transaction.Contract contract : contracts) {
+////    Contract contract = this.transaction.getRawData().getContract()
   }
 
   // todo mv this static function to capsule util
