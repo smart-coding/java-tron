@@ -27,6 +27,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.utils.ByteArray;
@@ -39,33 +40,10 @@ import org.tron.protos.Protocol.TXOutputs;
 public class UtxoStore extends TronDatabase {
 
   @Autowired
-  private UtxoStore(@Qualifier("utxo") String dbName) {
+  private UtxoStore(@Value("utxo") String dbName) {
     super(dbName);
   }
 
-
-  private static UtxoStore instance;
-
-  /**
-   * create fun.
-   *
-   * @param dbName the name of database
-   */
-  public static UtxoStore create(String dbName) {
-    if (instance == null) {
-      synchronized (UtxoStore.class) {
-        if (instance == null) {
-          instance = new UtxoStore(dbName);
-        }
-      }
-    }
-    return instance;
-  }
-
-
-  public void reSet() {
-    this.dbSource.resetDb();
-  }
 
   public byte[] find(byte[] key) {
     return dbSource.getData(key);
@@ -158,4 +136,5 @@ public class UtxoStore extends TronDatabase {
   public boolean has(byte[] key) {
     return false;
   }
+  
 }

@@ -10,17 +10,19 @@ import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.exception.BadBlockException;
 import org.tron.core.exception.BadTransactionException;
+import org.tron.core.exception.NonCommonBlockException;
 import org.tron.core.exception.StoreException;
 import org.tron.core.exception.TronException;
 import org.tron.core.exception.UnLinkedBlockException;
 import org.tron.core.net.message.MessageTypes;
+import sun.security.krb5.internal.crypto.Nonce;
 
 public interface NodeDelegate {
 
   LinkedList<Sha256Hash> handleBlock(BlockCapsule block, boolean syncMode)
-      throws BadBlockException, UnLinkedBlockException;
+      throws BadBlockException, UnLinkedBlockException, InterruptedException, NonCommonBlockException;
 
-  void handleTransaction(TransactionCapsule trx) throws BadTransactionException;
+  boolean handleTransaction(TransactionCapsule trx) throws BadTransactionException;
 
   LinkedList<BlockId> getLostBlockIds(List<BlockId> blockChainSummary) throws StoreException;
 
@@ -35,6 +37,8 @@ public interface NodeDelegate {
 
   BlockId getHeadBlockId();
 
+  BlockId getSolidBlockId();
+
   boolean contain(Sha256Hash hash, MessageTypes type);
 
   boolean containBlock(BlockId id);
@@ -46,5 +50,4 @@ public interface NodeDelegate {
   BlockCapsule getGenesisBlock();
 
   boolean canChainRevoke(long num);
-
 }

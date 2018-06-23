@@ -61,7 +61,7 @@ public class PeerServer {
     public void start(int port) {
 
         bossGroup = new NioEventLoopGroup(1);
-        workerGroup = new NioEventLoopGroup();
+        workerGroup = new NioEventLoopGroup(args.getTcpNettyWorkThreadNum());
         tronChannelInitializer = ctx.getBean(TronChannelInitializer.class, "");
 
         tronChannelInitializer.setNodeImpl(p2pNode);
@@ -85,13 +85,14 @@ public class PeerServer {
             channelFuture = b.bind(port).sync();
 
             listening = true;
+
             // Wait until the connection is closed.
             channelFuture.channel().closeFuture().sync();
-            logger.info("Connection is closed");
+
+            logger.info("TCP listener is closed");
 
         } catch (Exception e) {
-            logger.debug("Exception: {} ({})", e.getMessage(), e.getClass().getName());
-            throw new Error("Server Disconnected");
+            logger.error("Start TCP server failed.", e);
         } finally {
             workerGroup.shutdownGracefully();
             bossGroup.shutdownGracefully();
@@ -102,16 +103,11 @@ public class PeerServer {
     public void close() {
         if (listening && channelFuture != null && channelFuture.channel().isOpen()) {
             try {
-                logger.info("Closing PeerServer...");
+                logger.info("Closing TCP server...");
                 channelFuture.channel().close().sync();
-                logger.info("PeerServer closed.");
             } catch (Exception e) {
-                logger.warn("Problems closing server channel", e);
+                logger.warn("Closing TCP server failed.", e);
             }
         }
-    }
-
-    public boolean isListening() {
-        return listening;
     }
 }

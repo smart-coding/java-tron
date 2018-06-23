@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd">
+
+<suite name="Wallet case">
+    <test name="Debug case" preserve-order="true">
+                <packages>
+                    <package name="stest.tron.wallet.*">
+                    </package>
+                </packages>
+<!--        <classes>
+            <class name="stest.tron.wallet.assetissue.WalletTestAssetIssue002"/>
+        </classes>-->
+    </test>
+</suite>

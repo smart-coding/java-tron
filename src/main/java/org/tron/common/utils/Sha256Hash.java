@@ -45,7 +45,6 @@ public class Sha256Hash implements Serializable, Comparable<Sha256Hash> {
 
   private final byte[] bytes;
 
-
   private byte[] generateBlockId(long blockNum, Sha256Hash blockHash) {
     byte[] numBytes = Longs.toByteArray(blockNum);
     byte[] hash = blockHash.getBytes();

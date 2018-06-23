@@ -1,35 +1,35 @@
 package org.tron.core.net.message;
 
-import com.google.protobuf.InvalidProtocolBufferException;
+import org.tron.common.utils.Sha256Hash;
 import org.tron.core.capsule.TransactionCapsule;
+import org.tron.core.exception.BadItemException;
 import org.tron.protos.Protocol.Transaction;
 
 public class TransactionMessage extends TronMessage {
 
-  private Transaction trx;
+  private TransactionCapsule transactionCapsule;
 
-  public TransactionMessage(byte[] packed) {
-    super(packed);
+  public TransactionMessage(byte[] data) throws BadItemException {
+    this.transactionCapsule = new TransactionCapsule(data);
+    this.data = data;
     this.type = MessageTypes.TRX.asByte();
   }
 
   public TransactionMessage(Transaction trx) {
-    this.trx = trx;
-    unpacked = true;
+    this.transactionCapsule = new TransactionCapsule(trx);
     this.type = MessageTypes.TRX.asByte();
+    this.data = trx.toByteArray();
   }
 
   @Override
-  public MessageTypes getType() {
-    return MessageTypes.fromByte(this.type);
+  public String toString() {
+    return new StringBuilder().append(super.toString())
+        .append("messageId: ").append(super.getMessageId()).toString();
   }
 
   @Override
-  public byte[] getData() {
-    if (data == null) {
-      pack();
-    }
-    return data;
+  public Sha256Hash getMessageId() {
+    return this.transactionCapsule.getTransactionId();
   }
 
   @Override
@@ -37,31 +37,7 @@ public class TransactionMessage extends TronMessage {
     return null;
   }
 
-  public Transaction getTransaction() {
-    unPack();
-    return trx;
-  }
-
   public TransactionCapsule getTransactionCapsule() {
-    return new TransactionCapsule(getTransaction());
+    return this.transactionCapsule;
   }
-
-  private synchronized void unPack() {
-    if (unpacked) {
-      return;
-    }
-
-    try {
-      this.trx = Transaction.parseFrom(data);
-    } catch (InvalidProtocolBufferException e) {
-      logger.debug(e.getMessage());
-    }
-
-    unpacked = true;
-  }
-
-  private void pack() {
-    this.data = this.trx.toByteArray();
-  }
-
 }

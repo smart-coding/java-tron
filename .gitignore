@@ -49,5 +49,6 @@ src/main/resources/META-INF/
 
 /output_manager/
 /output_witness/
-
+output*
 nodeId.properties
+Wallet

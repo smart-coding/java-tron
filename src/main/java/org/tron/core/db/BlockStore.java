@@ -15,15 +15,15 @@
 
 package org.tron.core.db;
 
-import com.googlecode.cqengine.IndexedCollection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.capsule.BlockCapsule;
@@ -31,46 +31,25 @@ import org.tron.core.capsule.BlockCapsule.BlockId;
 import org.tron.core.db.common.iterator.BlockIterator;
 import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
-import org.tron.protos.Protocol.Block;
+import org.tron.core.exception.StoreException;
 
 @Slf4j
 @Component
 public class BlockStore extends TronStoreWithRevoking<BlockCapsule> {
 
   private BlockCapsule head;
-  private IndexedCollection<Block> blockIndex;
 
   @Autowired
-  private BlockStore(@Qualifier("block") String dbName) {
+  private BlockStore(@Value("block") String dbName) {
     super(dbName);
-  }
-
-  private static BlockStore instance;
-
-  public static void destroy() {
-    instance = null;
   }
 
   @Override
   public void put(byte[] key, BlockCapsule item) {
-    if (indexHelper != null) {
+    super.put(key, item);
+    if (Objects.nonNull(indexHelper)) {
       indexHelper.update(item.getInstance());
     }
-    super.put(key, item);
-  }
-
-  /**
-   * create fun.
-   */
-  public static BlockStore create(String dbName) {
-    if (instance == null) {
-      synchronized (BlockStore.class) {
-        if (instance == null) {
-          instance = new BlockStore(dbName);
-        }
-      }
-    }
-    return instance;
   }
 
   @Override
@@ -120,8 +99,24 @@ public class BlockStore extends TronStoreWithRevoking<BlockCapsule> {
   }
 
   @Override
-  public Iterator<BlockCapsule> iterator() {
+  public Iterator<Entry<byte[], BlockCapsule>> iterator() {
     return new BlockIterator(dbSource.iterator());
   }
 
+  @Override
+  public void delete(byte[] key) {
+    deleteIndex(key);
+    super.delete(key);
+  }
+
+  private void deleteIndex(byte[] key) {
+    if (Objects.nonNull(indexHelper)) {
+      try {
+        BlockCapsule item = get(key);
+        indexHelper.remove(item.getInstance());
+      } catch (StoreException e) {
+        return;
+      }
+    }
+  }
 }

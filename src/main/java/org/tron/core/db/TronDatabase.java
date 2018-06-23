@@ -2,6 +2,8 @@ package org.tron.core.db;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.Map.Entry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.tron.common.storage.leveldb.LevelDbDataSourceImpl;
@@ -12,7 +14,7 @@ import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ItemNotFoundException;
 
 @Slf4j
-public abstract class TronDatabase<T> implements Iterable<T>, Quitable {
+public abstract class TronDatabase<T> implements Iterable<Map.Entry<byte[], T>>, Quitable {
 
   protected LevelDbDataSourceImpl dbSource;
 
@@ -20,7 +22,7 @@ public abstract class TronDatabase<T> implements Iterable<T>, Quitable {
   protected IndexHelper indexHelper;
 
   protected TronDatabase(String dbName) {
-    dbSource = new LevelDbDataSourceImpl(Args.getInstance().getOutputDirectory(), dbName);
+    dbSource = new LevelDbDataSourceImpl(Args.getInstance().getOutputDirectoryByDbName(dbName), dbName);
     dbSource.initDB();
   }
 
@@ -61,7 +63,7 @@ public abstract class TronDatabase<T> implements Iterable<T>, Quitable {
   }
 
   @Override
-  public Iterator<T> iterator() {
+  public Iterator<Entry<byte[], T>> iterator() {
     throw new UnsupportedOperationException();
   }
 }

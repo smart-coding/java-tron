@@ -1,19 +1,27 @@
 package org.tron.core.services;
 
+import static org.tron.core.witness.BlockProductionCondition.NOT_MY_TURN;
+
 import com.google.common.collect.Maps;
 import com.google.protobuf.ByteString;
 import java.util.Map;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.joda.time.DateTime;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.tron.common.application.Application;
 import org.tron.common.application.Service;
+import org.tron.common.backup.BackupManager;
+import org.tron.common.backup.BackupManager.BackupStatusEnum;
+import org.tron.common.backup.BackupServer;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.StringUtil;
 import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.Parameter.ChainConstant;
 import org.tron.core.config.args.Args;
+import org.tron.core.exception.AccountResourceInsufficientException;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.TronException;
@@ -27,7 +35,8 @@ import org.tron.core.witness.WitnessController;
 @Slf4j
 public class WitnessService implements Service {
 
-  private static final int MIN_PARTICIPATION_RATE = Args.getInstance().getMinParticipationRate(); // MIN_PARTICIPATION_RATE * 1%
+  private static final int MIN_PARTICIPATION_RATE = Args.getInstance()
+      .getMinParticipationRate(); // MIN_PARTICIPATION_RATE * 1%
   private static final int PRODUCE_TIME_OUT = 500; // ms
   private Application tronApp;
   @Getter
@@ -36,17 +45,34 @@ public class WitnessService implements Service {
   private Thread generateThread;
   private volatile boolean isRunning = false;
   private Map<ByteString, byte[]> privateKeyMap = Maps.newHashMap();
-  private boolean needSyncCheck = Args.getInstance().isNeedSyncCheck();
+  private volatile boolean needSyncCheck = Args.getInstance().isNeedSyncCheck();
 
   private WitnessController controller;
+
+  private AnnotationConfigApplicationContext context;
+
+  private BackupManager backupManager;
+
+  private BackupServer backupServer;
 
   /**
    * Construction method.
    */
-  public WitnessService(Application tronApp) {
+  public WitnessService(Application tronApp, AnnotationConfigApplicationContext context) {
     this.tronApp = tronApp;
+    this.context = context;
+    backupManager = context.getBean(BackupManager.class);
+    backupServer = context.getBean(BackupServer.class);
     generateThread = new Thread(scheduleProductionLoop);
     controller = tronApp.getDbManager().getWitnessController();
+    new Thread(()->{
+      while (needSyncCheck){
+        try{
+          Thread.sleep(100);
+        }catch (Exception e){}
+      }
+      backupServer.initServer();
+    }).start();
   }
 
   /**
@@ -81,6 +107,8 @@ public class WitnessService implements Service {
             logger.info("ProductionLoop interrupted");
           } catch (Exception ex) {
             logger.error("unknown exception happened in witness loop", ex);
+          } catch (Throwable throwable) {
+            logger.error("unknown throwable happened in witness loop", throwable);
           }
         }
       };
@@ -96,38 +124,10 @@ public class WitnessService implements Service {
       return;
     }
 
-    switch (result) {
-      case PRODUCED:
-        logger.debug("Produced");
-        break;
-      case NOT_SYNCED:
-        logger.info("Not sync");
-        break;
-      case NOT_MY_TURN:
-        logger.debug("It's not my turn");
-        break;
-      case NOT_TIME_YET:
-        logger.info("Not time yet");
-        break;
-      case NO_PRIVATE_KEY:
-        logger.info("No pri key");
-        break;
-      case LOW_PARTICIPATION:
-        logger.info("Low part");
-        break;
-      case LAG:
-        logger.info("Lag");
-        break;
-      case CONSECUTIVE:
-        logger.info("Consecutive");
-        break;
-      case TIME_OUT:
-        logger.debug("Time out");
-      case EXCEPTION_PRODUCING_BLOCK:
-        logger.info("Exception");
-        break;
-      default:
-        break;
+    if (result.ordinal() <= NOT_MY_TURN.ordinal()) {
+      logger.debug(result.toString());
+    } else {
+      logger.info(result.toString());
     }
   }
 
@@ -136,6 +136,9 @@ public class WitnessService implements Service {
    */
   private BlockProductionCondition tryProduceBlock() throws InterruptedException {
     logger.info("Try Produce Block");
+    if (!backupManager.getStatus().equals(BackupStatusEnum.MASTER)){
+      return BlockProductionCondition.BACKUP_STATUS_IS_NOT_MASTER;
+    }
     long now = DateTime.now().getMillis() + 50L;
     if (this.needSyncCheck) {
       long nexSlotTime = controller.getSlotTime(1);
@@ -159,6 +162,11 @@ public class WitnessService implements Service {
       logger.warn(
           "Participation[" + participation + "] <  MIN_PARTICIPATION_RATE[" + MIN_PARTICIPATION_RATE
               + "]");
+
+      if (logger.isDebugEnabled()) {
+        this.controller.dumpParticipationLog();
+      }
+
       return BlockProductionCondition.LOW_PARTICIPATION;
     }
 
@@ -184,13 +192,19 @@ public class WitnessService implements Service {
       return BlockProductionCondition.EXCEPTION_PRODUCING_BLOCK;
     }
 
+    if (!controller.activeWitnessesContain(this.getLocalWitnessStateMap().keySet())) {
+      logger.info("Unelected. Elected Witnesses: {}",
+          StringUtil.getAddressStringList(controller.getActiveWitnesses()));
+      return BlockProductionCondition.UNELECTED;
+    }
+
     final ByteString scheduledWitness = controller.getScheduledWitness(slot);
 
     if (!this.getLocalWitnessStateMap().containsKey(scheduledWitness)) {
-      logger.info("It's not my turn,ScheduledWitness[{}],slot[{}],abSlot[{}],",
+      logger.info("It's not my turn, ScheduledWitness[{}],slot[{}],abSlot[{}],",
           ByteArray.toHexString(scheduledWitness.toByteArray()), slot,
           controller.getAbSlotAtTime(now));
-      return BlockProductionCondition.NOT_MY_TURN;
+      return NOT_MY_TURN;
     }
 
     long scheduledTime = controller.getSlotTime(slot);
@@ -204,24 +218,35 @@ public class WitnessService implements Service {
     }
 
     try {
+      controller.setGeneratingBlock(true);
       BlockCapsule block = generateBlock(scheduledTime, scheduledWitness);
-      if (DateTime.now().getMillis() - now > ChainConstant.BLOCK_PRODUCED_INTERVAL) {
+
+      if (block == null) {
+        logger.warn("exception when generate block");
+        return BlockProductionCondition.EXCEPTION_PRODUCING_BLOCK;
+      }
+      if (DateTime.now().getMillis() - now
+          > ChainConstant.BLOCK_PRODUCED_INTERVAL * ChainConstant.BLOCK_PRODUCED_TIME_OUT) {
         logger.warn("Task timeout ( > {}ms)，startTime:{},endTime:{}",
-            ChainConstant.BLOCK_PRODUCED_INTERVAL,
+            ChainConstant.BLOCK_PRODUCED_INTERVAL * ChainConstant.BLOCK_PRODUCED_TIME_OUT,
             new DateTime(now), DateTime.now());
         return BlockProductionCondition.TIME_OUT;
       }
 
       logger.info(
-          "Produce block successfully, blockNumber:{},abSlot[{}],blockId:{}, blockTime:{}, parentBlockId:{}",
+          "Produce block successfully, blockNumber:{}, abSlot[{}], blockId:{}, transactionSize:{}, blockTime:{}, parentBlockId:{}",
           block.getNum(), controller.getAbSlotAtTime(now), block.getBlockId(),
+          block.getTransactions().size(),
           new DateTime(block.getTimeStamp()),
           this.tronApp.getDbManager().getDynamicPropertiesStore().getLatestBlockHeaderHash());
       broadcastBlock(block);
+
       return BlockProductionCondition.PRODUCED;
     } catch (TronException e) {
       logger.error(e.getMessage(), e);
       return BlockProductionCondition.EXCEPTION_PRODUCING_BLOCK;
+    } finally {
+      controller.setGeneratingBlock(false);
     }
 
   }
@@ -235,7 +260,7 @@ public class WitnessService implements Service {
   }
 
   private BlockCapsule generateBlock(long when, ByteString witnessAddress)
-      throws ValidateSignatureException, ContractValidateException, ContractExeException, UnLinkedBlockException, ValidateScheduleException {
+      throws ValidateSignatureException, ContractValidateException, ContractExeException, UnLinkedBlockException, ValidateScheduleException, AccountResourceInsufficientException {
     return tronApp.getDbManager().generateBlock(this.localWitnessStateMap.get(witnessAddress), when,
         this.privateKeyMap.get(witnessAddress));
   }

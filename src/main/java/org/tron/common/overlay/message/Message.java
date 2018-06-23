@@ -9,12 +9,10 @@ import org.slf4j.LoggerFactory;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.net.message.MessageTypes;
 
-
 public abstract class Message {
 
-  protected static final Logger logger = LoggerFactory.getLogger("Net");
+  protected static final Logger logger = LoggerFactory.getLogger("Message");
 
-  protected boolean unpacked;
   protected byte[] data;
   protected byte type;
 
@@ -23,15 +21,12 @@ public abstract class Message {
 
   public Message(byte[] packed) {
     this.data = packed;
-    unpacked = false;
   }
 
   public Message(byte type, byte[] packed) {
     this.type = type;
     this.data = packed;
-    unpacked = false;
   }
-
 
   public ByteBuf getSendData(){
      return Unpooled.wrappedBuffer(ArrayUtils.add(this.getData(), 0 ,type));
@@ -41,15 +36,25 @@ public abstract class Message {
     return Sha256Hash.of(getData());
   }
 
-  public abstract byte[] getData();
+  public byte[] getData(){
+    return this.data;
+  }
 
-  public String toString() {
-    return "[Message Type: " + getType() + ", Message Hash: " + getMessageId() + "]";
+  public MessageTypes getType(){
+    return MessageTypes.fromByte(this.type);
   }
 
   public abstract Class<?> getAnswerMessage();
 
-  //public byte getCode() { return type; }
+  @Override
+  public String toString() {
+    return "type: " + getType() + "\n";
+  }
+
+  @Override
+  public int hashCode() {
+    return Arrays.hashCode(data);
+  }
 
   @Override
   public boolean equals(Object o) {
@@ -62,12 +67,4 @@ public abstract class Message {
     Message message = (Message) o;
     return Arrays.equals(data, message.data);
   }
-
-  @Override
-  public int hashCode() {
-    return Arrays.hashCode(data);
-  }
-
-  public abstract MessageTypes getType();
-
 }

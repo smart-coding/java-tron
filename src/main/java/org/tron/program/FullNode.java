@@ -1,6 +1,7 @@
 package org.tron.program;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.tron.common.application.Application;
@@ -22,19 +23,24 @@ public class FullNode {
     Args.setParam(args, Constant.TESTNET_CONF);
     Args cfgArgs = Args.getInstance();
 
-    ApplicationContext context = new AnnotationConfigApplicationContext(DefaultConfig.class);
-
     if (cfgArgs.isHelp()) {
       logger.info("Here is the help message.");
       return;
     }
+
+    DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
+    beanFactory.setAllowCircularReferences(false);
+    AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(beanFactory);
+    context.register(DefaultConfig.class);
+    context.refresh();
     Application appT = ApplicationFactory.create(context);
     shutdown(appT);
     //appT.init(cfgArgs);
+
     RpcApiService rpcApiService = context.getBean(RpcApiService.class);
     appT.addService(rpcApiService);
     if (cfgArgs.isWitness()) {
-      appT.addService(new WitnessService(appT));
+      appT.addService(new WitnessService(appT, context));
     }
     appT.initServices(cfgArgs);
     appT.startServices();
@@ -42,8 +48,8 @@ public class FullNode {
     rpcApiService.blockUntilShutdown();
   }
 
-  private static void shutdown(final Application app) {
-    logger.info("********register application shutdown ********");
+  public static void shutdown(final Application app) {
+    logger.info("********register application shutdown hook********");
     Runtime.getRuntime().addShutdownHook(new Thread(app::shutdown));
   }
 }

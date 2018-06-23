@@ -17,8 +17,10 @@ package org.tron.core.capsule;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.protos.Contract.AssetIssueContract;
+import org.tron.protos.Contract.AssetIssueContract.FrozenSupply;
 
 @Slf4j
 public class AssetIssueCapsule implements ProtoCapsule<AssetIssueContract> {
@@ -58,6 +60,10 @@ public class AssetIssueCapsule implements ProtoCapsule<AssetIssueContract> {
     return this.assetIssueContract.getName();
   }
 
+  public byte[] createDbKey() {
+    return getName().toByteArray();
+  }
+
   public int getNum() {
     return this.assetIssueContract.getNum();
   }
@@ -76,5 +82,67 @@ public class AssetIssueCapsule implements ProtoCapsule<AssetIssueContract> {
 
   public ByteString getOwnerAddress() {
     return this.assetIssueContract.getOwnerAddress();
+  }
+
+  public int getFrozenSupplyCount() {
+    return getInstance().getFrozenSupplyCount();
+  }
+
+  public List<FrozenSupply> getFrozenSupplyList() {
+    return getInstance().getFrozenSupplyList();
+  }
+
+  public long getFrozenSupply() {
+    List<FrozenSupply> frozenList = getFrozenSupplyList();
+    final long[] frozenBalance = {0};
+    frozenList.forEach(frozen -> frozenBalance[0] = Long.sum(frozenBalance[0],
+        frozen.getFrozenAmount()));
+    return frozenBalance[0];
+  }
+
+  public long getFreeAssetNetLimit() {
+    return this.assetIssueContract.getFreeAssetNetLimit();
+  }
+
+  public void setFreeAssetNetLimit(long newLimit) {
+    this.assetIssueContract = this.assetIssueContract.toBuilder()
+        .setFreeAssetNetLimit(newLimit).build();
+  }
+
+  public long getPublicFreeAssetNetLimit() {
+    return this.assetIssueContract.getPublicFreeAssetNetLimit();
+  }
+
+  public void setPublicFreeAssetNetLimit(long newPublicLimit) {
+    this.assetIssueContract = this.assetIssueContract.toBuilder()
+        .setPublicFreeAssetNetLimit(newPublicLimit).build();
+  }
+
+  public long getPublicFreeAssetNetUsage() {
+    return this.assetIssueContract.getPublicFreeAssetNetUsage();
+  }
+
+  public void setPublicFreeAssetNetUsage(long value) {
+    this.assetIssueContract = this.assetIssueContract.toBuilder()
+        .setPublicFreeAssetNetUsage(value).build();
+  }
+
+  public long getPublicLatestFreeNetTime() {
+    return this.assetIssueContract.getPublicLatestFreeNetTime();
+  }
+
+  public void setPublicLatestFreeNetTime(long time) {
+    this.assetIssueContract = this.assetIssueContract.toBuilder()
+        .setPublicLatestFreeNetTime(time).build();
+  }
+
+  public void setUrl(ByteString newUrl) {
+    this.assetIssueContract = this.assetIssueContract.toBuilder()
+        .setUrl(newUrl).build();
+  }
+
+  public void setDescription(ByteString description) {
+    this.assetIssueContract = this.assetIssueContract.toBuilder()
+        .setDescription(description).build();
   }
 }

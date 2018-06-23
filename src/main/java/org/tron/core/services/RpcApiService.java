@@ -3,49 +3,62 @@ package org.tron.core.services;
 import com.google.common.base.Preconditions;
 import com.google.protobuf.ByteString;
 import io.grpc.Server;
-import io.grpc.ServerBuilder;
+import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 import org.tron.api.DatabaseGrpc.DatabaseImplBase;
 import org.tron.api.GrpcAPI;
-import org.tron.api.GrpcAPI.AccountList;
+import org.tron.api.GrpcAPI.AccountNetMessage;
+import org.tron.api.GrpcAPI.AccountPaginated;
 import org.tron.api.GrpcAPI.Address;
 import org.tron.api.GrpcAPI.AssetIssueList;
 import org.tron.api.GrpcAPI.BlockLimit;
 import org.tron.api.GrpcAPI.BlockList;
 import org.tron.api.GrpcAPI.BlockReference;
 import org.tron.api.GrpcAPI.BytesMessage;
+import org.tron.api.GrpcAPI.EasyTransferMessage;
+import org.tron.api.GrpcAPI.EasyTransferResponse;
 import org.tron.api.GrpcAPI.EmptyMessage;
 import org.tron.api.GrpcAPI.Node;
 import org.tron.api.GrpcAPI.NodeList;
 import org.tron.api.GrpcAPI.NumberMessage;
-import org.tron.api.GrpcAPI.TimeMessage;
+import org.tron.api.GrpcAPI.PaginatedMessage;
+import org.tron.api.GrpcAPI.Return.response_code;
 import org.tron.api.GrpcAPI.TransactionList;
 import org.tron.api.GrpcAPI.WitnessList;
+import org.tron.api.WalletExtensionGrpc;
 import org.tron.api.WalletGrpc.WalletImplBase;
 import org.tron.api.WalletSolidityGrpc.WalletSolidityImplBase;
 import org.tron.common.application.Service;
-import org.tron.common.overlay.discover.NodeHandler;
-import org.tron.common.overlay.discover.NodeManager;
+import org.tron.common.crypto.ECKey;
+import org.tron.common.overlay.discover.node.NodeHandler;
+import org.tron.common.overlay.discover.node.NodeManager;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.StringUtil;
+import org.tron.core.Constant;
 import org.tron.core.Wallet;
 import org.tron.core.WalletSolidity;
 import org.tron.core.actuator.Actuator;
 import org.tron.core.actuator.ActuatorFactory;
 import org.tron.core.capsule.AccountCapsule;
+import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.config.args.Args;
+import org.tron.core.db.BandwidthProcessor;
 import org.tron.core.db.Manager;
 import org.tron.core.exception.ContractValidateException;
+import org.tron.core.exception.HeaderNotFound;
 import org.tron.core.exception.StoreException;
 import org.tron.protos.Contract;
 import org.tron.protos.Contract.AccountCreateContract;
@@ -53,6 +66,7 @@ import org.tron.protos.Contract.AssetIssueContract;
 import org.tron.protos.Contract.ParticipateAssetIssueContract;
 import org.tron.protos.Contract.TransferAssetContract;
 import org.tron.protos.Contract.TransferContract;
+import org.tron.protos.Contract.UnfreezeAssetContract;
 import org.tron.protos.Contract.VoteWitnessContract;
 import org.tron.protos.Contract.WitnessCreateContract;
 import org.tron.protos.Protocol.Account;
@@ -60,6 +74,8 @@ import org.tron.protos.Protocol.Block;
 import org.tron.protos.Protocol.DynamicProperties;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
+import org.tron.protos.Protocol.TransactionInfo;
+import org.tron.protos.Protocol.TransactionSign;
 
 @Component
 @Slf4j
@@ -91,19 +107,40 @@ public class RpcApiService implements Service {
   @Override
   public void start() {
     try {
-      ServerBuilder serverBuilder = ServerBuilder.forPort(port)
+      NettyServerBuilder serverBuilder = NettyServerBuilder.forPort(port)
           .addService(new DatabaseApi());
-      if (Args.getInstance().isSolidityNode()) {
+
+      Args args = Args.getInstance();
+
+      if (args.getRpcThreadNum() > 0) {
+        serverBuilder = serverBuilder
+            .executor(Executors.newFixedThreadPool(args.getRpcThreadNum()));
+      }
+
+      if (args.isSolidityNode()) {
         serverBuilder = serverBuilder.addService(new WalletSolidityApi());
+        if (args.isWalletExtensionApi()) {
+          serverBuilder = serverBuilder.addService(new WalletExtensionApi());
+        }
       } else {
         serverBuilder = serverBuilder.addService(new WalletApi());
       }
+
+      // Set configs from config.conf or default value
+      serverBuilder
+          .maxConcurrentCallsPerConnection(args.getMaxConcurrentCallsPerConnection())
+          .flowControlWindow(args.getFlowControlWindow())
+          .maxConnectionIdle(args.getMaxConnectionIdleInMillis(), TimeUnit.MILLISECONDS)
+          .maxConnectionAge(args.getMaxConnectionAgeInMillis(), TimeUnit.MILLISECONDS)
+          .maxMessageSize(args.getMaxMessageSize())
+          .maxHeaderListSize(args.getMaxHeaderListSize());
+
       apiServer = serverBuilder.build().start();
     } catch (IOException e) {
       logger.debug(e.getMessage(), e);
     }
 
-    logger.info("Server started, listening on " + port);
+    logger.info("RpcApiService started, listening on " + port);
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
       System.err.println("*** shutting down gRPC server since JVM is shutting down");
@@ -178,8 +215,15 @@ public class RpcApiService implements Service {
     public void getAccount(Account request, StreamObserver<Account> responseObserver) {
       ByteString addressBs = request.getAddress();
       if (addressBs != null) {
-        Account reply = walletSolidity.getAccount(addressBs);
-        responseObserver.onNext(reply);
+        Account reply = wallet.getAccount(request);
+        if (reply == null) {
+          responseObserver.onNext(null);
+        } else {
+          AccountCapsule accountCapsule = new AccountCapsule(reply);
+          BandwidthProcessor processor = new BandwidthProcessor(dbManager);
+          processor.updateUsage(accountCapsule);
+          responseObserver.onNext(accountCapsule.getInstance());
+        }
       } else {
         responseObserver.onNext(null);
       }
@@ -187,88 +231,40 @@ public class RpcApiService implements Service {
     }
 
     @Override
-    public void listAccounts(EmptyMessage request, StreamObserver<AccountList> responseObserver) {
-
-      responseObserver.onNext(walletSolidity.getAccountList());
-      responseObserver.onCompleted();
-    }
-
-    @Override
     public void listWitnesses(EmptyMessage request, StreamObserver<WitnessList> responseObserver) {
-      responseObserver.onNext(walletSolidity.getWitnessList());
+      responseObserver.onNext(wallet.getWitnessList());
       responseObserver.onCompleted();
     }
 
     @Override
     public void getAssetIssueList(EmptyMessage request,
         StreamObserver<AssetIssueList> responseObserver) {
-      responseObserver.onNext(walletSolidity.getAssetIssueList());
+      responseObserver.onNext(wallet.getAssetIssueList());
       responseObserver.onCompleted();
     }
 
     @Override
-    public void getAssetIssueListByTimestamp(NumberMessage request,
+    public void getPaginatedAssetIssueList(PaginatedMessage request,
         StreamObserver<AssetIssueList> responseObserver) {
-
-      long timestamp = request.getNum();
-      if (timestamp > 0) {
-        AssetIssueList reply = walletSolidity.getAssetIssueListByTimestamp(timestamp);
-        responseObserver.onNext(reply);
-      } else {
-        responseObserver.onNext(null);
-      }
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void getAssetIssueByAccount(Account request,
-        StreamObserver<AssetIssueList> responseObserver) {
-
-      ByteString address = request.getAddress();
-      if (null != address) {
-        AssetIssueList reply = walletSolidity.getAssetIssueByAccount(address);
-        responseObserver.onNext(reply);
-      } else {
-        responseObserver.onNext(null);
-      }
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void getAssetIssueByName(BytesMessage request,
-        StreamObserver<AssetIssueContract> responseObserver) {
-      ByteString name = request.getValue();
-      if (null != name) {
-        AssetIssueContract reply = walletSolidity.getAssetIssueByName(name);
-        responseObserver.onNext(reply);
-      } else {
-        responseObserver.onNext(null);
-      }
+      responseObserver.onNext(wallet.getAssetIssueList(request.getOffset(), request.getLimit()));
       responseObserver.onCompleted();
     }
 
     @Override
     public void getNowBlock(EmptyMessage request, StreamObserver<Block> responseObserver) {
-      responseObserver.onNext(walletSolidity.getNowBlock());
+      responseObserver.onNext(wallet.getNowBlock());
       responseObserver.onCompleted();
     }
 
     @Override
     public void getBlockByNum(NumberMessage request, StreamObserver<Block> responseObserver) {
       long num = request.getNum();
-      if (num > 0) {
-        Block reply = walletSolidity.getBlockByNum(num);
+      if (num >= 0) {
+        Block reply = wallet.getBlockByNum(num);
         responseObserver.onNext(reply);
       } else {
         responseObserver.onNext(null);
       }
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void totalTransaction(EmptyMessage request,
-        StreamObserver<NumberMessage> responseObserver) {
-      responseObserver.onNext(walletSolidity.totalTransaction());
       responseObserver.onCompleted();
     }
 
@@ -286,47 +282,58 @@ public class RpcApiService implements Service {
       responseObserver.onCompleted();
     }
 
-
     @Override
-    public void getTransactionsByTimestamp(TimeMessage request,
-        StreamObserver<TransactionList> responseObserver) {
-      long beginTime = request.getBeginInMilliseconds();
-      long endTime = request.getEndInMilliseconds();
-      if (beginTime < 0 || endTime < 0 || endTime < beginTime) {
-        responseObserver.onNext(null);
-      } else {
-        TransactionList reply = walletSolidity.getTransactionsByTimestamp(beginTime, endTime);
-        responseObserver.onNext(reply);
-      }
-      responseObserver.onCompleted();
-    }
+    public void getTransactionInfoById(BytesMessage request,
+        StreamObserver<TransactionInfo> responseObserver) {
+      ByteString id = request.getValue();
+      if (null != id) {
+        TransactionInfo reply = walletSolidity.getTransactionInfoById(id);
 
-
-    @Override
-    public void getTransactionsFromThis(Account request,
-        StreamObserver<TransactionList> responseObserver) {
-      ByteString thisAddress = request.getAddress();
-      if (null != thisAddress) {
-        TransactionList reply = walletSolidity.getTransactionsFromThis(thisAddress);
         responseObserver.onNext(reply);
       } else {
         responseObserver.onNext(null);
       }
       responseObserver.onCompleted();
     }
+  }
+
+  /**
+   * WalletExtensionApi.
+   */
+  private class WalletExtensionApi extends WalletExtensionGrpc.WalletExtensionImplBase {
 
     @Override
-    public void getTransactionsToThis(Account request,
-        StreamObserver<TransactionList> responseObserver) {
-      ByteString toAddress = request.getAddress();
-      if (null != toAddress) {
-        TransactionList reply = walletSolidity.getTransactionsToThis(toAddress);
+    public void getTransactionsFromThis(AccountPaginated request,
+        StreamObserver<GrpcAPI.TransactionList> responseObserver) {
+      ByteString thisAddress = request.getAccount().getAddress();
+      long offset = request.getOffset();
+      long limit = request.getLimit();
+      if (null != thisAddress && offset >= 0 && limit >= 0) {
+        TransactionList reply = walletSolidity
+            .getTransactionsFromThis(thisAddress, offset, limit);
         responseObserver.onNext(reply);
       } else {
         responseObserver.onNext(null);
       }
       responseObserver.onCompleted();
     }
+
+    @Override
+    public void getTransactionsToThis(AccountPaginated request,
+        StreamObserver<GrpcAPI.TransactionList> responseObserver) {
+      ByteString toAddress = request.getAccount().getAddress();
+      long offset = request.getOffset();
+      long limit = request.getLimit();
+      if (null != toAddress && offset >= 0 && limit >= 0) {
+        TransactionList reply = walletSolidity
+            .getTransactionsToThis(toAddress, offset, limit);
+        responseObserver.onNext(reply);
+      } else {
+        responseObserver.onNext(null);
+      }
+      responseObserver.onCompleted();
+    }
+
   }
 
   /**
@@ -338,7 +345,7 @@ public class RpcApiService implements Service {
     public void getAccount(Account req, StreamObserver<Account> responseObserver) {
       ByteString addressBs = req.getAddress();
       if (addressBs != null) {
-        Account reply = wallet.getBalance(req);
+        Account reply = wallet.getAccount(req);
         responseObserver.onNext(reply);
       } else {
         responseObserver.onNext(null);
@@ -351,11 +358,12 @@ public class RpcApiService implements Service {
         StreamObserver<Transaction> responseObserver) {
       try {
         responseObserver
-            .onNext(createTransactionCapsule(request, ContractType.TransferContract).getInstance());
+            .onNext(
+                createTransactionCapsule(request, ContractType.TransferContract).getInstance());
       } catch (ContractValidateException e) {
         responseObserver
             .onNext(null);
-        logger.debug("ContractValidateException", e.getMessage());
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
       responseObserver.onCompleted();
     }
@@ -367,33 +375,82 @@ public class RpcApiService implements Service {
       for (Actuator act : actList) {
         act.validate();
       }
+      try {
+        BlockCapsule headBlock = null;
+        List<BlockCapsule> blockList = dbManager.getBlockStore().getBlockByLatestNum(1);
+        if (CollectionUtils.isEmpty(blockList)) {
+          throw new HeaderNotFound("latest block not found");
+        } else {
+          headBlock = blockList.get(0);
+        }
+        trx.setReference(headBlock.getNum(), headBlock.getBlockId().getBytes());
+        long expiration = headBlock.getTimeStamp() + Constant.TRANSACTION_DEFAULT_EXPIRATION_TIME;
+        trx.setExpiration(expiration);
+      } catch (HeaderNotFound headerNotFound) {
+        headerNotFound.printStackTrace();
+      }
       return trx;
+    }
+
+    @Override
+    public void getTransactionSign(TransactionSign req,
+        StreamObserver<Transaction> responseObserver) {
+      TransactionCapsule retur = wallet.getTransactionSign(req);
+      responseObserver.onNext(retur.getInstance());
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void createAdresss(BytesMessage req,
+        StreamObserver<BytesMessage> responseObserver) {
+      byte[] address = wallet.createAdresss(req.getValue().toByteArray());
+      BytesMessage.Builder builder = BytesMessage.newBuilder();
+      builder.setValue(ByteString.copyFrom(address));
+      responseObserver.onNext(builder.build());
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void easyTransfer(EasyTransferMessage req,
+        StreamObserver<EasyTransferResponse> responseObserver) {
+      byte[] privateKey = wallet.pass2Key(req.getPassPhrase().toByteArray());
+      ECKey ecKey = ECKey.fromPrivate(privateKey);
+      byte[] owner = ecKey.getAddress();
+      TransferContract.Builder builder = TransferContract.newBuilder();
+      builder.setOwnerAddress(ByteString.copyFrom(owner));
+      builder.setToAddress(req.getToAddress());
+      builder.setAmount(req.getAmount());
+
+      TransactionCapsule transactionCapsule = null;
+      GrpcAPI.Return.Builder returnBuilder = GrpcAPI.Return.newBuilder();
+      EasyTransferResponse.Builder responseBuild = EasyTransferResponse.newBuilder();
+      try {
+        transactionCapsule = createTransactionCapsule(builder.build(),
+            ContractType.TransferContract);
+      } catch (ContractValidateException e) {
+        returnBuilder.setResult(false).setCode(response_code.CONTRACT_VALIDATE_ERROR)
+            .setMessage(ByteString.copyFromUtf8(e.getMessage()));
+        responseBuild.setResult(returnBuilder.build());
+        responseObserver.onNext(responseBuild.build());
+        responseObserver.onCompleted();
+        return;
+      }
+
+      transactionCapsule.sign(privateKey);
+      GrpcAPI.Return retur = wallet.broadcastTransaction(transactionCapsule.getInstance());
+      responseBuild.setTransaction(transactionCapsule.getInstance());
+      responseBuild.setResult(retur);
+      responseObserver.onNext(responseBuild.build());
+      responseObserver.onCompleted();
     }
 
     @Override
     public void broadcastTransaction(Transaction req,
         StreamObserver<GrpcAPI.Return> responseObserver) {
-      boolean ret = wallet.broadcastTransaction(req);
-      GrpcAPI.Return retur = GrpcAPI.Return.newBuilder().setResult(ret).build();
+      GrpcAPI.Return retur = wallet.broadcastTransaction(req);
       responseObserver.onNext(retur);
       responseObserver.onCompleted();
     }
-
-    @Override
-    public void createAccount(AccountCreateContract request,
-        StreamObserver<Transaction> responseObserver) {
-      try {
-        responseObserver.onNext(
-            createTransactionCapsule(request, ContractType.AccountCreateContract).getInstance());
-      } catch (ContractValidateException e) {
-        responseObserver
-            .onNext(null);
-        logger.debug("ContractValidateException", e.getMessage());
-        responseObserver.onNext(null);
-      }
-      responseObserver.onCompleted();
-    }
-
 
     @Override
     public void createAssetIssue(AssetIssueContract request,
@@ -402,11 +459,21 @@ public class RpcApiService implements Service {
         responseObserver.onNext(
             createTransactionCapsule(request, ContractType.AssetIssueContract).getInstance());
       } catch (ContractValidateException e) {
-        responseObserver
-            .onNext(null);
-        logger.debug("ContractValidateException", e.getMessage());
         responseObserver.onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
 
+    @Override
+    public void unfreezeAsset(UnfreezeAssetContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request, ContractType.UnfreezeAssetContract).getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver.onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
       responseObserver.onCompleted();
     }
@@ -423,8 +490,8 @@ public class RpcApiService implements Service {
 
       int votesCount = req.getVotesCount();
       Preconditions.checkArgument(votesCount <= 0, "VotesCount[" + votesCount + "] <= 0");
-      Preconditions.checkArgument(account.getShare() < votesCount,
-          "Share[" + account.getShare() + "] <  VotesCount[" + votesCount + "]");
+      Preconditions.checkArgument(account.getTronPower() < votesCount,
+          "tron power[" + account.getTronPower() + "] <  VotesCount[" + votesCount + "]");
 
       req.getVotesList().forEach(vote -> {
         ByteString voteAddress = vote.getVoteAddress();
@@ -448,7 +515,7 @@ public class RpcApiService implements Service {
       } catch (ContractValidateException e) {
         responseObserver
             .onNext(null);
-        logger.debug("ContractValidateException", e.getMessage());
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
       responseObserver.onCompleted();
     }
@@ -462,7 +529,21 @@ public class RpcApiService implements Service {
       } catch (ContractValidateException e) {
         responseObserver
             .onNext(null);
-        logger.debug("ContractValidateException", e.getMessage());
+        logger.debug("ContractValidateException: {}", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void createAccount(AccountCreateContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request, ContractType.AccountCreateContract).getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
       responseObserver.onCompleted();
     }
@@ -477,7 +558,80 @@ public class RpcApiService implements Service {
       } catch (ContractValidateException e) {
         responseObserver
             .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void updateAccount(Contract.AccountUpdateContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request, ContractType.AccountUpdateContract).getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void updateAsset(Contract.UpdateAssetContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request,
+                ContractType.UpdateAssetContract).getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
         logger.debug("ContractValidateException", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void freezeBalance(Contract.FreezeBalanceContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request, ContractType.FreezeBalanceContract).getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void unfreezeBalance(Contract.UnfreezeBalanceContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request, ContractType.UnfreezeBalanceContract)
+                .getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void withdrawBalance(Contract.WithdrawBalanceContract request,
+        StreamObserver<Transaction> responseObserver) {
+      try {
+        responseObserver.onNext(
+            createTransactionCapsule(request, ContractType.WithdrawBalanceContract)
+                .getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
       responseObserver.onCompleted();
     }
@@ -495,18 +649,6 @@ public class RpcApiService implements Service {
     }
 
     @Override
-    public void listAccounts(EmptyMessage request, StreamObserver<AccountList> responseObserver) {
-      responseObserver.onNext(wallet.getAllAccounts());
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void listWitnesses(EmptyMessage request, StreamObserver<WitnessList> responseObserver) {
-      responseObserver.onNext(wallet.getWitnessList());
-      responseObserver.onCompleted();
-    }
-
-    @Override
     public void listNodes(EmptyMessage request, StreamObserver<NodeList> responseObserver) {
       List<NodeHandler> handlerList = nodeManager.dumpActiveNodes();
 
@@ -520,7 +662,7 @@ public class RpcApiService implements Service {
 
       nodeHandlerMap.entrySet().stream()
           .forEach(v -> {
-            org.tron.common.overlay.discover.Node node = v.getValue().getNode();
+            org.tron.common.overlay.discover.node.Node node = v.getValue().getNode();
             nodeListBuilder.addNodes(Node.newBuilder().setAddress(
                 Address.newBuilder()
                     .setHost(ByteString.copyFrom(ByteArray.fromString(node.getHost())))
@@ -534,14 +676,14 @@ public class RpcApiService implements Service {
     @Override
     public void transferAsset(TransferAssetContract request,
         StreamObserver<Transaction> responseObserver) {
-      ByteString fromBs = request.getOwnerAddress();
-
-      if (fromBs != null) {
-
-        Transaction trx = wallet.createTransaction(request);
-        responseObserver.onNext(trx);
-      } else {
-        responseObserver.onNext(null);
+      try {
+        responseObserver
+            .onNext(createTransactionCapsule(request, ContractType.TransferAssetContract)
+                .getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
       responseObserver.onCompleted();
     }
@@ -549,21 +691,15 @@ public class RpcApiService implements Service {
     @Override
     public void participateAssetIssue(ParticipateAssetIssueContract request,
         StreamObserver<Transaction> responseObserver) {
-      ByteString fromBs = request.getOwnerAddress();
-
-      if (fromBs != null) {
-        Transaction trx = wallet.createTransaction(request);
-        responseObserver.onNext(trx);
-      } else {
-        responseObserver.onNext(null);
+      try {
+        responseObserver
+            .onNext(createTransactionCapsule(request, ContractType.ParticipateAssetIssueContract)
+                .getInstance());
+      } catch (ContractValidateException e) {
+        responseObserver
+            .onNext(null);
+        logger.debug("ContractValidateException: {}", e.getMessage());
       }
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void getAssetIssueList(EmptyMessage request,
-        StreamObserver<AssetIssueList> responseObserver) {
-      responseObserver.onNext(wallet.getAssetIssueList());
       responseObserver.onCompleted();
     }
 
@@ -581,6 +717,19 @@ public class RpcApiService implements Service {
     }
 
     @Override
+    public void getAccountNet(Account request,
+        StreamObserver<AccountNetMessage> responseObserver) {
+      ByteString fromBs = request.getAddress();
+
+      if (fromBs != null) {
+        responseObserver.onNext(wallet.getAccountNet(fromBs));
+      } else {
+        responseObserver.onNext(null);
+      }
+      responseObserver.onCompleted();
+    }
+
+    @Override
     public void getAssetIssueByName(BytesMessage request,
         StreamObserver<AssetIssueContract> responseObserver) {
       ByteString asertName = request.getValue();
@@ -590,13 +739,6 @@ public class RpcApiService implements Service {
       } else {
         responseObserver.onNext(null);
       }
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void totalTransaction(EmptyMessage request,
-        StreamObserver<NumberMessage> responseObserver) {
-      responseObserver.onNext(wallet.totalTransaction());
       responseObserver.onCompleted();
     }
 
@@ -651,11 +793,48 @@ public class RpcApiService implements Service {
       }
       responseObserver.onCompleted();
     }
+
+    @Override
+    public void totalTransaction(EmptyMessage request,
+        StreamObserver<NumberMessage> responseObserver) {
+      responseObserver.onNext(wallet.totalTransaction());
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void getNextMaintenanceTime(EmptyMessage request,
+        StreamObserver<NumberMessage> responseObserver) {
+      responseObserver.onNext(wallet.getNextMaintenanceTime());
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void getAssetIssueList(EmptyMessage request,
+        StreamObserver<AssetIssueList> responseObserver) {
+      responseObserver.onNext(wallet.getAssetIssueList());
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void getPaginatedAssetIssueList(PaginatedMessage request,
+        StreamObserver<AssetIssueList> responseObserver) {
+      responseObserver.onNext(wallet.getAssetIssueList(request.getOffset(), request.getLimit()));
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void listWitnesses(EmptyMessage request,
+        StreamObserver<WitnessList> responseObserver) {
+      responseObserver.onNext(wallet.getWitnessList());
+      responseObserver.onCompleted();
+    }
   }
 
   @Override
   public void stop() {
-
+    if (apiServer != null) {
+      apiServer.shutdown();
+    }
   }
 
   /**

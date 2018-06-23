@@ -26,19 +26,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
 import org.tron.common.overlay.message.DisconnectMessage;
 import org.tron.common.overlay.message.P2pMessage;
-import org.tron.common.overlay.message.ReasonCode;
 
 @Component
 @Scope("prototype")
 public class P2pHandler extends SimpleChannelInboundHandler<P2pMessage> {
-
-  private final static Logger logger = LoggerFactory.getLogger("P2pHandler");
 
   private static ScheduledExecutorService pingTimer =
       Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "P2pPingTimer"));
@@ -49,68 +44,64 @@ public class P2pHandler extends SimpleChannelInboundHandler<P2pMessage> {
 
   private ScheduledFuture<?> pingTask;
 
+  private volatile boolean hasPing = false;
+
+  private volatile long sendPingTime;
+
+  private ChannelHandlerContext ctx;
+
   @Override
   public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
-    msgQueue.activate(ctx);
+    this.ctx = ctx;
     pingTask = pingTimer.scheduleAtFixedRate(() -> {
-      try {
-        msgQueue.sendMessage(PING_MESSAGE);
-      } catch (Throwable t) {
-        logger.error("startTimers exception", t);
+      if (!hasPing){
+        sendPingTime = System.currentTimeMillis();
+        hasPing = msgQueue.sendMessage(PING_MESSAGE);
       }
-    }, 2, 10, TimeUnit.SECONDS);
+    }, 10, 10, TimeUnit.SECONDS);
   }
 
   @Override
   public void channelRead0(final ChannelHandlerContext ctx, P2pMessage msg) throws InterruptedException {
+
+    msgQueue.receivedMessage(msg);
+
     switch (msg.getType()) {
-      case P2P_DISCONNECT:
-        msgQueue.receivedMessage(msg);
-        channel.getNodeStatistics()
-            .nodeDisconnectedRemote(ReasonCode.fromInt(((DisconnectMessage) msg).getReason()));
-        logger.info("rcv disconnect msg  {}, {}", ctx.channel().remoteAddress(),
-               ReasonCode.fromInt (((DisconnectMessage) msg).getReason()));
-        ctx.close();
-        break;
       case P2P_PING:
-        msgQueue.receivedMessage(msg);
         msgQueue.sendMessage(PONG_MESSAGE);
         break;
       case P2P_PONG:
-        msgQueue.receivedMessage(msg);
+        hasPing = false;
         channel.getNodeStatistics().lastPongReplyTime.set(System.currentTimeMillis());
+        channel.getPeerStats().pong(sendPingTime);
+        break;
+      case P2P_DISCONNECT:
+        channel.getNodeStatistics()
+            .nodeDisconnectedRemote(((DisconnectMessage) msg).getReasonCode());
+        channel.close();
         break;
       default:
-        logger.info("Receive error msg, {}", ctx.channel().remoteAddress());
-        ctx.close();
+        channel.close();
         break;
     }
   }
 
   @Override
-  public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-    logger.info("channel inactive {}", ctx.channel().remoteAddress());
-    closeChannel(ctx);
-  }
-
-  @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-    logger.error("exception caught, {}", ctx.channel().remoteAddress(), cause);
-    ctx.close();
-    closeChannel(ctx);
-  }
-
-  public void closeChannel(ChannelHandlerContext ctx) {
-    pingTask.cancel(false);
-    msgQueue.close();
+    channel.processException(cause);
   }
 
   public void setMsgQueue(MessageQueue msgQueue) {
-        this.msgQueue = msgQueue;
+    this.msgQueue = msgQueue;
   }
 
   public void setChannel(Channel channel) {
     this.channel = channel;
   }
 
+  public void close() {
+    if (pingTask != null && !pingTask.isCancelled()){
+      pingTask.cancel(false);
+    }
+  }
 }

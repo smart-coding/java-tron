@@ -1,83 +1,42 @@
 package org.tron.common.overlay.message;
 
-import com.google.protobuf.InvalidProtocolBufferException;
 import org.tron.core.net.message.MessageTypes;
 import org.tron.protos.Protocol;
+import org.tron.protos.Protocol.ReasonCode;
 
 public class DisconnectMessage extends P2pMessage {
 
   private Protocol.DisconnectMessage disconnectMessage;
 
-  public DisconnectMessage(byte[] rawData) {
-    super(rawData);
-    this.type = MessageTypes.P2P_DISCONNECT.asByte();
-  }
-
-  public DisconnectMessage(byte type, byte[] rawData) {
+  public DisconnectMessage(byte type, byte[] rawData) throws Exception{
     super(type, rawData);
+    this.disconnectMessage = Protocol.DisconnectMessage.parseFrom(this.data);
   }
 
-  /**
-   * The reason of disconnect.
-   */
   public DisconnectMessage(ReasonCode reasonCode) {
     this.disconnectMessage = Protocol.DisconnectMessage
         .newBuilder()
-        .setReason(Protocol.ReasonCode.forNumber(reasonCode.getReason()))
+        .setReason(reasonCode)
         .build();
     this.type = MessageTypes.P2P_DISCONNECT.asByte();
     this.data = this.disconnectMessage.toByteArray();
   }
 
-  private void unPack() {
-    try {
-      this.disconnectMessage = Protocol.DisconnectMessage.parseFrom(this.data);
-    } catch (InvalidProtocolBufferException e) {
-      logger.debug(e.getMessage(), e);
-    }
-    unpacked = true;
-  }
-
-  private void pack() {
-    this.data = this.disconnectMessage.toByteArray();
-  }
-
-  @Override
-  public byte[] getData() {
-    if (this.data == null) {
-      this.pack();
-    }
-    return this.data;
-  }
-
-  /**
-   * Get reason of disconnect.
-   */
   public int getReason() {
-    if (!this.unpacked) {
-      this.unPack();
-    }
-
     return this.disconnectMessage.getReason().getNumber();
   }
 
-  /**
-   * Print reason of disconnect.
-   */
+  public ReasonCode getReasonCode() {
+    return disconnectMessage.getReason();
+  }
+
+  @Override
   public String toString() {
-    if (!this.unpacked) {
-      this.unPack();
-    }
-    return "[" + this.getType().name() + " reason=" + this.getReason() + "]";
+    return new StringBuilder().append(super.toString()).append("reason: ").append(this.disconnectMessage.getReason()).toString();
   }
 
   @Override
   public Class<?> getAnswerMessage() {
     return null;
-  }
-
-  @Override
-  public MessageTypes getType() {
-    return MessageTypes.fromByte(this.type);
   }
 }

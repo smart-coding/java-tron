@@ -29,6 +29,7 @@ import java.security.SignatureException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.crypto.ECKey.ECDSASignature;
@@ -36,22 +37,27 @@ import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.Sha256Hash;
 import org.tron.core.Wallet;
 import org.tron.core.db.AccountStore;
+import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ValidateSignatureException;
-import org.tron.protos.Contract.AccountUpdateContract;
 import org.tron.protos.Contract.AccountCreateContract;
+import org.tron.protos.Contract.AccountUpdateContract;
+import org.tron.protos.Contract.FreezeBalanceContract;
 import org.tron.protos.Contract.ParticipateAssetIssueContract;
 import org.tron.protos.Contract.TransferAssetContract;
 import org.tron.protos.Contract.TransferContract;
+import org.tron.protos.Contract.UnfreezeAssetContract;
+import org.tron.protos.Contract.UnfreezeBalanceContract;
+import org.tron.protos.Contract.UpdateAssetContract;
+import org.tron.protos.Contract.WithdrawBalanceContract;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.Transaction.Contract.ContractType;
-import org.tron.protos.Protocol.Transaction.TransactionType;
 
 @Slf4j
 public class TransactionCapsule implements ProtoCapsule<Transaction> {
 
   private Transaction transaction;
-  private boolean isValidated = false;
-
+  @Setter
+  private boolean isVerified = false;
   /**
    * constructor TransactionCapsule.
    */
@@ -62,31 +68,30 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   /**
    * get account from bytes data.
    */
-  public TransactionCapsule(byte[] data) {
+  public TransactionCapsule(byte[] data) throws BadItemException{
     try {
       this.transaction = Transaction.parseFrom(data);
     } catch (InvalidProtocolBufferException e) {
-      logger.debug(e.getMessage());
+      throw new BadItemException("Transaction proto data parse exception");
     }
   }
 
+  /*lll
   public TransactionCapsule(byte[] key, long value) throws IllegalArgumentException {
     if (!Wallet.addressValid(key)) {
-      throw new IllegalArgumentException("Invalidate address");
+      throw new IllegalArgumentException("Invalid address");
     }
     TransferContract transferContract = TransferContract.newBuilder()
         .setAmount(value)
         .setOwnerAddress(ByteString.copyFrom("0x0000000000000000000".getBytes()))
         .setToAddress(ByteString.copyFrom(key))
         .build();
-    Transaction.raw.Builder transactionBuilder = Transaction.raw.newBuilder().setType(
-        TransactionType.ContractType).addContract(
+    Transaction.raw.Builder transactionBuilder = Transaction.raw.newBuilder().addContract(
         Transaction.Contract.newBuilder().setType(ContractType.TransferContract).setParameter(
             Any.pack(transferContract)).build());
     logger.info("Transaction create succeeded！");
     transaction = Transaction.newBuilder().setRawData(transactionBuilder.build()).build();
-  }
-
+  }*/
 
   public TransactionCapsule(AccountCreateContract contract, AccountStore accountStore) {
     AccountCapsule account = accountStore.get(contract.getOwnerAddress().toByteArray());
@@ -128,8 +133,12 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     createTransaction(participateAssetIssueContract, ContractType.ParticipateAssetIssueContract);
   }
 
+  public void resetResult() {
+    this.transaction = this.getInstance().toBuilder().clearRet().build();
+  }
+
   public void setResult(TransactionResultCapsule transactionResultCapsule) {
-    //this.getInstance().toBuilder(). (transactionResultCapsule.getInstance());
+//    this.transaction = this.getInstance().toBuilder().addRet(transactionResultCapsule.getInstance()).build();
   }
 
   public void setReference(long blockNum, byte[] blockHash) {
@@ -141,10 +150,17 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     this.transaction = this.transaction.toBuilder().setRawData(rawData).build();
   }
 
+  /**
+   * @param expiration must be in milliseconds format
+   */
   public void setExpiration(long expiration) {
     Transaction.raw rawData = this.transaction.getRawData().toBuilder().setExpiration(expiration)
         .build();
     this.transaction = this.transaction.toBuilder().setRawData(rawData).build();
+  }
+
+  public long getExpiration() {
+    return transaction.getRawData().getExpiration();
   }
 
   @Deprecated
@@ -152,38 +168,32 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     createTransaction(assetIssueContract, ContractType.AssetIssueContract);
   }
 
-
   public TransactionCapsule(com.google.protobuf.Message message, ContractType contractType) {
-    Transaction.raw.Builder transactionBuilder = Transaction.raw.newBuilder().setType(
-        TransactionType.ContractType).addContract(
+    Transaction.raw.Builder transactionBuilder = Transaction.raw.newBuilder().addContract(
         Transaction.Contract.newBuilder().setType(contractType).setParameter(
             Any.pack(message)).build());
-    logger.info("Transaction create succeeded！");
     transaction = Transaction.newBuilder().setRawData(transactionBuilder.build()).build();
   }
-
 
   @Deprecated
   public void createTransaction(com.google.protobuf.Message message, ContractType contractType) {
-    Transaction.raw.Builder transactionBuilder = Transaction.raw.newBuilder().setType(
-        TransactionType.ContractType).addContract(
+    Transaction.raw.Builder transactionBuilder = Transaction.raw.newBuilder().addContract(
         Transaction.Contract.newBuilder().setType(contractType).setParameter(
             Any.pack(message)).build());
-    logger.info("Transaction create succeeded！");
     transaction = Transaction.newBuilder().setRawData(transactionBuilder.build()).build();
   }
 
-  public Sha256Hash getHash() {
+  public Sha256Hash getMerkleHash() {
     byte[] transBytes = this.transaction.toByteArray();
     return Sha256Hash.of(transBytes);
   }
 
-  public Sha256Hash getRawHash() {
+  private Sha256Hash getRawHash() {
     return Sha256Hash.of(this.transaction.getRawData().toByteArray());
   }
 
   /**
-   * cheack balance of the address.
+   * check balance of the address.
    */
   public boolean checkBalance(byte[] address, byte[] to, long amount, long balance) {
     if (!Wallet.addressValid(address)) {
@@ -209,11 +219,10 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
     return true;
   }
 
-  @Deprecated
   public void sign(byte[] privateKey) {
     ECKey ecKey = ECKey.fromPrivate(privateKey);
     ECDSASignature signature = ecKey.sign(getRawHash().getBytes());
-    ByteString sig = ByteString.copyFrom(signature.toBase64().getBytes());
+    ByteString sig = ByteString.copyFrom(signature.toByteArray());
     this.transaction = this.transaction.toBuilder().addSignature(sig).build();
   }
 
@@ -247,14 +256,31 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
         case DeployContract:
           owner = contractParameter.unpack(DeployContract.class).getOwnerAddress();
           break;
+        case WitnessUpdateContract:
+          owner = contractParameter.unpack(WitnessUpdateContract.class).getOwnerAddress();
+          break;
         case ParticipateAssetIssueContract:
           owner = contractParameter.unpack(ParticipateAssetIssueContract.class).getOwnerAddress();
           break;
         case AccountUpdateContract:
           owner = contractParameter.unpack(AccountUpdateContract.class).getOwnerAddress();
           break;
+        case FreezeBalanceContract:
+          owner = contractParameter.unpack(FreezeBalanceContract.class).getOwnerAddress();
+          break;
+        case UnfreezeBalanceContract:
+          owner = contractParameter.unpack(UnfreezeBalanceContract.class).getOwnerAddress();
+          break;
+        case UnfreezeAssetContract:
+          owner = contractParameter.unpack(UnfreezeAssetContract.class).getOwnerAddress();
+          break;
+        case WithdrawBalanceContract:
+          owner = contractParameter.unpack(WithdrawBalanceContract.class).getOwnerAddress();
+          break;
+        case UpdateAssetContract:
+          owner = contractParameter.unpack(UpdateAssetContract.class).getOwnerAddress();
+          break;
         // todo add other contract
-
         default:
           return null;
       }
@@ -308,8 +334,7 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
    * validate signature
    */
   public boolean validateSignature() throws ValidateSignatureException {
-
-    if (isValidated == true) {
+    if (isVerified == true) {
       return true;
     }
 
@@ -326,26 +351,30 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
         byte[] address = ECKey.signatureToAddress(getRawHash().getBytes(),
             getBase64FromByteString(this.transaction.getSignature(i)));
         if (!Arrays.equals(owner, address)) {
-          isValidated = false;
+          isVerified = false;
           throw new ValidateSignatureException("sig error");
         }
       } catch (SignatureException e) {
-        isValidated = false;
+        isVerified = false;
         throw new ValidateSignatureException(e.getMessage());
       }
     }
-    isValidated = true;
+
+    isVerified = true;
     return true;
   }
 
-
   public Sha256Hash getTransactionId() {
-    return Sha256Hash.of(this.transaction.getRawData().toByteArray());
+    return getRawHash();
   }
 
   @Override
   public byte[] getData() {
     return this.transaction.toByteArray();
+  }
+
+  public long getSerializedSize() {
+    return this.transaction.getSerializedSize();
   }
 
   @Override
@@ -354,7 +383,6 @@ public class TransactionCapsule implements ProtoCapsule<Transaction> {
   }
 
   private StringBuffer toStringBuff = new StringBuffer();
-
 
   @Override
   public String toString() {

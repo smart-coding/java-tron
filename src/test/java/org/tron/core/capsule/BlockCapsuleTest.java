@@ -14,13 +14,17 @@ import org.tron.core.Constant;
 import org.tron.core.Wallet;
 import org.tron.core.config.args.Args;
 import org.tron.core.exception.BadItemException;
+import org.tron.protos.Contract.TransferContract;
+import org.tron.protos.Protocol.Transaction.Contract.ContractType;
 
 @Slf4j
 public class BlockCapsuleTest {
 
-  private static BlockCapsule blockCapsule0 = new BlockCapsule(1, ByteString
+  private static BlockCapsule blockCapsule0 = new BlockCapsule(1,
+      Sha256Hash.wrap(ByteString
       .copyFrom(ByteArray
-          .fromHexString("9938a342238077182498b464ac0292229938a342238077182498b464ac029222")), 1234,
+          .fromHexString("9938a342238077182498b464ac0292229938a342238077182498b464ac029222"))),
+      1234,
       ByteString.copyFrom("1234567".getBytes()));
   private static String dbPath = "output_bloackcapsule_test";
 
@@ -45,20 +49,35 @@ public class BlockCapsuleTest {
 
     logger.info("Transaction[X] Merkle Root : {}", blockCapsule0.getMerkleRoot().toString());
 
-    TransactionCapsule transactionCapsule1 = new TransactionCapsule(
-        ByteArray.fromHexString(
-            Wallet.getAddressPreFixString() + "A389132D6639FBDA4FBC8B659264E6B7C90DB086"), 1L);
-    TransactionCapsule transactionCapsule2 = new TransactionCapsule(
-        ByteArray.fromHexString(
-            Wallet.getAddressPreFixString() + "ED738B3A0FE390EAA71B768B6D02CDBD18FB207B"), 2L);
+    TransferContract transferContract1 = TransferContract.newBuilder()
+        .setAmount(1L)
+        .setOwnerAddress(ByteString.copyFrom("0x0000000000000000000".getBytes()))
+        .setToAddress(ByteString.copyFrom(ByteArray.fromHexString(
+            (Wallet.getAddressPreFixString() + "A389132D6639FBDA4FBC8B659264E6B7C90DB086"))))
+        .build();
 
-    blockCapsule0.addTransaction(transactionCapsule1);
-    blockCapsule0.addTransaction(transactionCapsule2);
+    TransferContract transferContract2 = TransferContract.newBuilder()
+        .setAmount(2L)
+        .setOwnerAddress(ByteString.copyFrom("0x0000000000000000000".getBytes()))
+        .setToAddress(ByteString.copyFrom(ByteArray.fromHexString(
+            (Wallet.getAddressPreFixString() + "ED738B3A0FE390EAA71B768B6D02CDBD18FB207B"))))
+        .build();
+
+    blockCapsule0
+        .addTransaction(new TransactionCapsule(transferContract1, ContractType.TransferContract));
+    blockCapsule0
+        .addTransaction(new TransactionCapsule(transferContract2, ContractType.TransferContract));
     blockCapsule0.setMerkleRoot();
 
-    Assert.assertEquals(
-        "b7ad4783b23a97bf9ac2ccd9b4e73eb6c45dc63dc24925f2b77ce1f0b2a1b2e6",
-        blockCapsule0.getMerkleRoot().toString());
+    if (Constant.ADD_PRE_FIX_BYTE_TESTNET == Wallet.getAddressPreFixByte()) {
+      Assert.assertEquals(
+          "53421c1f1bcbbba67a4184cc3dbc1a59f90af7e2b0644dcfc8dc738fe30deffc",
+          blockCapsule0.getMerkleRoot().toString());
+    } else {
+      Assert.assertEquals(
+          "5bc862243292e6aa1d5e21a60bb6a673e4c2544709f6363d4a2f85ec29bcfe00",
+          blockCapsule0.getMerkleRoot().toString());
+    }
 
     logger.info("Transaction[O] Merkle Root : {}", blockCapsule0.getMerkleRoot().toString());
   }

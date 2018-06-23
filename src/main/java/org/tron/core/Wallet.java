@@ -19,50 +19,57 @@
 package org.tron.core;
 
 import com.google.protobuf.ByteString;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.tron.api.GrpcAPI.AccountList;
+import org.springframework.util.CollectionUtils;
+import org.tron.api.GrpcAPI;
+import org.tron.api.GrpcAPI.AccountNetMessage;
 import org.tron.api.GrpcAPI.AssetIssueList;
 import org.tron.api.GrpcAPI.BlockList;
 import org.tron.api.GrpcAPI.NumberMessage;
+import org.tron.api.GrpcAPI.Return.response_code;
 import org.tron.api.GrpcAPI.WitnessList;
 import org.tron.common.crypto.ECKey;
-import org.tron.common.crypto.Hash;
 import org.tron.common.overlay.message.Message;
 import org.tron.common.utils.Base58;
 import org.tron.common.utils.ByteArray;
+import org.tron.common.utils.Sha256Hash;
 import org.tron.common.utils.Utils;
 import org.tron.core.capsule.AccountCapsule;
 import org.tron.core.capsule.AssetIssueCapsule;
+import org.tron.core.capsule.BlockCapsule;
 import org.tron.core.capsule.TransactionCapsule;
 import org.tron.core.capsule.WitnessCapsule;
 import org.tron.core.db.AccountStore;
+import org.tron.core.db.BandwidthProcessor;
 import org.tron.core.db.Manager;
+import org.tron.core.db.PendingManager;
+import org.tron.core.exception.AccountResourceInsufficientException;
+import org.tron.core.exception.BadItemException;
 import org.tron.core.exception.ContractExeException;
 import org.tron.core.exception.ContractValidateException;
 import org.tron.core.exception.DupTransactionException;
-import org.tron.core.exception.HighFreqException;
 import org.tron.core.exception.StoreException;
 import org.tron.core.exception.TaposException;
+import org.tron.core.exception.TooBigTransactionException;
+import org.tron.core.exception.TransactionExpirationException;
 import org.tron.core.exception.ValidateSignatureException;
 import org.tron.core.net.message.TransactionMessage;
 import org.tron.core.net.node.NodeImpl;
-import org.tron.protos.Contract.AccountCreateContract;
 import org.tron.protos.Contract.AssetIssueContract;
-import org.tron.protos.Contract.ParticipateAssetIssueContract;
-import org.tron.protos.Contract.TransferAssetContract;
 import org.tron.protos.Contract.TransferContract;
-import org.tron.protos.Contract.VoteWitnessContract;
-import org.tron.protos.Contract.WitnessCreateContract;
-import org.tron.protos.Contract.WitnessUpdateContract;
 import org.tron.protos.Protocol.Account;
 import org.tron.protos.Protocol.Block;
 import org.tron.protos.Protocol.Transaction;
+import org.tron.protos.Protocol.TransactionSign;
 
 
 @Slf4j
@@ -114,7 +121,7 @@ public class Wallet {
   }
 
   public static boolean addressValid(byte[] address) {
-    if (address == null || address.length == 0) {
+    if (ArrayUtils.isEmpty(address)) {
       logger.warn("Warning: Address is empty !!");
       return false;
     }
@@ -134,8 +141,8 @@ public class Wallet {
   }
 
   public static String encode58Check(byte[] input) {
-    byte[] hash0 = Hash.sha256(input);
-    byte[] hash1 = Hash.sha256(hash0);
+    byte[] hash0 = Sha256Hash.hash(input);
+    byte[] hash1 = Sha256Hash.hash(hash0);
     byte[] inputCheck = new byte[input.length + 4];
     System.arraycopy(input, 0, inputCheck, 0, input.length);
     System.arraycopy(hash1, 0, inputCheck, input.length, 4);
@@ -149,8 +156,8 @@ public class Wallet {
     }
     byte[] decodeData = new byte[decodeCheck.length - 4];
     System.arraycopy(decodeCheck, 0, decodeData, 0, decodeData.length);
-    byte[] hash0 = Hash.sha256(decodeData);
-    byte[] hash1 = Hash.sha256(hash0);
+    byte[] hash0 = Sha256Hash.hash(decodeData);
+    byte[] hash1 = Sha256Hash.hash(hash0);
     if (hash1[0] == decodeCheck[decodeData.length] &&
         hash1[1] == decodeCheck[decodeData.length + 1] &&
         hash1[2] == decodeCheck[decodeData.length + 2] &&
@@ -165,25 +172,28 @@ public class Wallet {
       logger.warn("Warning: Address is empty !!");
       return null;
     }
-    if (addressBase58.length() != Constant.BASE58CHECK_ADDRESS_SIZE) {
-      logger.warn(
-          "Warning: Base58 address length need " + Constant.BASE58CHECK_ADDRESS_SIZE + " but "
-              + addressBase58.length()
-              + " !!");
+    byte[] address = decode58Check(addressBase58);
+    if (address == null) {
       return null;
     }
-    byte[] address = decode58Check(addressBase58);
+
     if (!addressValid(address)) {
       return null;
     }
+
     return address;
   }
 
 
-  public Account getBalance(Account account) {
+  public Account getAccount(Account account) {
     AccountStore accountStore = dbManager.getAccountStore();
     AccountCapsule accountCapsule = accountStore.get(account.getAddress().toByteArray());
-    return accountCapsule == null ? null : accountCapsule.getInstance();
+    if (accountCapsule == null) {
+      return null;
+    }
+    BandwidthProcessor processor = new BandwidthProcessor(dbManager);
+    processor.updateUsage(accountCapsule);
+    return accountCapsule.getInstance();
   }
 
   /**
@@ -197,6 +207,7 @@ public class Wallet {
   /**
    * Create a transaction by contract.
    */
+  @Deprecated
   public Transaction createTransaction(TransferContract contract) {
     AccountStore accountStore = dbManager.getAccountStore();
     return new TransactionCapsule(contract, accountStore).getInstance();
@@ -205,60 +216,107 @@ public class Wallet {
   /**
    * Broadcast a transaction.
    */
-  public boolean broadcastTransaction(Transaction signaturedTransaction) {
-    TransactionCapsule trx = new TransactionCapsule(signaturedTransaction);
+  public GrpcAPI.Return broadcastTransaction(Transaction signaturedTransaction) {
+    GrpcAPI.Return.Builder builder = GrpcAPI.Return.newBuilder();
+
     try {
+      TransactionCapsule trx = new TransactionCapsule(signaturedTransaction);
       Message message = new TransactionMessage(signaturedTransaction);
+
+      if (dbManager.isTooManyPending()) {
+        logger.debug(
+            "Manager is busy, pending transaction count:{}, discard the new coming transaction",
+            (dbManager.getPendingTransactions().size() + PendingManager.getTmpTransactions()
+                .size()));
+        return builder.setResult(false).setCode(response_code.SERVER_BUSY).build();
+      }
+
+      if (dbManager.isGeneratingBlock()) {
+        logger.debug("Manager is generating block, discard the new coming transaction");
+        return builder.setResult(false).setCode(response_code.SERVER_BUSY).build();
+      }
+
+      if (dbManager.getTransactionIdCache().getIfPresent(trx.getTransactionId()) != null) {
+        logger.debug("This transaction has been processed, discard the transaction");
+        return builder.setResult(false).setCode(response_code.DUP_TRANSACTION_ERROR).build();
+      } else {
+        dbManager.getTransactionIdCache().put(trx.getTransactionId(), true);
+      }
+
       dbManager.pushTransactions(trx);
       p2pNode.broadcast(message);
-      return true;
+      return builder.setResult(true).setCode(response_code.SUCCESS).build();
     } catch (ValidateSignatureException e) {
-      logger.debug(e.getMessage(), e);
+      logger.info(e.getMessage());
+      return builder.setResult(false).setCode(response_code.SIGERROR)
+          .setMessage(ByteString.copyFromUtf8("validate signature error"))
+          .build();
     } catch (ContractValidateException e) {
-      logger.debug(e.getMessage(), e);
+      logger.info(e.getMessage());
+      return builder.setResult(false).setCode(response_code.CONTRACT_VALIDATE_ERROR)
+          .setMessage(ByteString.copyFromUtf8("contract validate error"))
+          .build();
     } catch (ContractExeException e) {
-      logger.debug(e.getMessage(), e);
-    } catch (HighFreqException e) {
-      logger.debug("high freq", e);
+      logger.info(e.getMessage());
+      return builder.setResult(false).setCode(response_code.CONTRACT_EXE_ERROR)
+          .setMessage(ByteString.copyFromUtf8("contract execute error"))
+          .build();
+    } catch (AccountResourceInsufficientException e) {
+      logger.info(e.getMessage());
+      return builder.setResult(false).setCode(response_code.BANDWITH_ERROR)
+          .setMessage(ByteString.copyFromUtf8("AccountResourceInsufficient error"))
+          .build();
     } catch (DupTransactionException e) {
-      logger.debug("dup trans", e);
+      logger.info("dup trans" + e.getMessage());
+      return builder.setResult(false).setCode(response_code.DUP_TRANSACTION_ERROR)
+          .setMessage(ByteString.copyFromUtf8("dup transaction"))
+          .build();
     } catch (TaposException e) {
-      logger.debug("tapos error", e);
+      logger.info("tapos error" + e.getMessage());
+      return builder.setResult(false).setCode(response_code.TAPOS_ERROR)
+          .setMessage(ByteString.copyFromUtf8("Tapos check error"))
+          .build();
+    } catch (TooBigTransactionException e) {
+      logger.info("transaction error" + e.getMessage());
+      return builder.setResult(false).setCode(response_code.TOO_BIG_TRANSACTION_ERROR)
+          .setMessage(ByteString.copyFromUtf8("transaction size is too big"))
+          .build();
+    } catch (TransactionExpirationException e) {
+      logger.info("transaction expired" + e.getMessage());
+      return builder.setResult(false).setCode(response_code.TRANSACTION_EXPIRATION_ERROR)
+          .setMessage(ByteString.copyFromUtf8("transaction expired"))
+          .build();
+    } catch (Exception e) {
+      logger.info("exception caught" + e.getMessage());
+      return builder.setResult(false).setCode(response_code.OTHER_ERROR)
+          .setMessage(ByteString.copyFromUtf8("other error"))
+          .build();
     }
-    return false;
   }
 
-  @Deprecated
-  public Transaction createAccount(AccountCreateContract contract) {
-    AccountStore accountStore = dbManager.getAccountStore();
-    return new TransactionCapsule(contract, accountStore).getInstance();
+  public TransactionCapsule getTransactionSign(TransactionSign transactionSign) {
+    byte[] privateKey = transactionSign.getPrivateKey().toByteArray();
+    TransactionCapsule trx = new TransactionCapsule(transactionSign.getTransaction());
+    trx.sign(privateKey);
+    return trx;
   }
 
-  @Deprecated
-  public Transaction createTransaction(VoteWitnessContract voteWitnessContract) {
-    return new TransactionCapsule(voteWitnessContract).getInstance();
+  public byte[] pass2Key(byte[] passPhrase){
+    return Sha256Hash.hash(passPhrase);
   }
 
-  @Deprecated
-  public Transaction createTransaction(AssetIssueContract assetIssueContract) {
-    return new TransactionCapsule(assetIssueContract).getInstance();
-  }
-
-  public Transaction createTransaction(WitnessCreateContract witnessCreateContract) {
-    return new TransactionCapsule(witnessCreateContract).getInstance();
-  }
-
-  @Deprecated
-  public Transaction createTransaction(WitnessUpdateContract witnessUpdateContract) {
-    return new TransactionCapsule(witnessUpdateContract).getInstance();
+  public byte[] createAdresss(byte[] passPhrase) {
+    byte[] privateKey = pass2Key(passPhrase);
+    ECKey ecKey = ECKey.fromPrivate(privateKey);
+    return ecKey.getAddress();
   }
 
   public Block getNowBlock() {
-    try {
-      return dbManager.getHead().getInstance();
-    } catch (StoreException e) {
-      logger.info(e.getMessage());
+    List<BlockCapsule> blockList = dbManager.getBlockStore().getBlockByLatestNum(1);
+    if (CollectionUtils.isEmpty(blockList)) {
       return null;
+    } else {
+      return blockList.get(0).getInstance();
     }
   }
 
@@ -271,14 +329,6 @@ public class Wallet {
     }
   }
 
-  public AccountList getAllAccounts() {
-    AccountList.Builder builder = AccountList.newBuilder();
-    List<AccountCapsule> accountCapsuleList =
-        dbManager.getAccountStore().getAllAccounts();
-    accountCapsuleList.forEach(accountCapsule -> builder.addAccounts(accountCapsule.getInstance()));
-    return builder.build();
-  }
-
   public WitnessList getWitnessList() {
     WitnessList.Builder builder = WitnessList.newBuilder();
     List<WitnessCapsule> witnessCapsuleList = dbManager.getWitnessStore().getAllWitnesses();
@@ -287,19 +337,21 @@ public class Wallet {
     return builder.build();
   }
 
-  public Transaction createTransaction(TransferAssetContract transferAssetContract) {
-    return new TransactionCapsule(transferAssetContract).getInstance();
-  }
-
-  public Transaction createTransaction(
-      ParticipateAssetIssueContract participateAssetIssueContract) {
-    return new TransactionCapsule(participateAssetIssueContract).getInstance();
-  }
-
   public AssetIssueList getAssetIssueList() {
     AssetIssueList.Builder builder = AssetIssueList.newBuilder();
     dbManager.getAssetIssueStore().getAllAssetIssues()
         .forEach(issueCapsule -> builder.addAssetIssue(issueCapsule.getInstance()));
+    return builder.build();
+  }
+
+  public AssetIssueList getAssetIssueList(long offset, long limit) {
+    AssetIssueList.Builder builder = AssetIssueList.newBuilder();
+    List<AssetIssueCapsule> assetIssueList = dbManager.getAssetIssueStore()
+        .getAssetIssuesPaginated(offset, limit);
+    if (null == assetIssueList || assetIssueList.size() == 0) {
+      return null;
+    }
+    assetIssueList.forEach(issueCapsule -> builder.addAssetIssue(issueCapsule.getInstance()));
     return builder.build();
   }
 
@@ -315,6 +367,41 @@ public class Wallet {
         .forEach(issueCapsule -> {
           builder.addAssetIssue(issueCapsule.getInstance());
         });
+    return builder.build();
+  }
+
+  public AccountNetMessage getAccountNet(ByteString accountAddress) {
+    if (accountAddress == null || accountAddress.size() == 0) {
+      return null;
+    }
+    AccountNetMessage.Builder builder = AccountNetMessage.newBuilder();
+    AccountCapsule accountCapsule = dbManager.getAccountStore().get(accountAddress.toByteArray());
+    if (accountCapsule == null) {
+      return null;
+    }
+
+    BandwidthProcessor processor = new BandwidthProcessor(dbManager);
+    processor.updateUsage(accountCapsule);
+
+    long netLimit = processor.calculateGlobalNetLimit(accountCapsule.getFrozenBalance());
+    long freeNetLimit = dbManager.getDynamicPropertiesStore().getFreeNetLimit();
+    long totalNetLimit = dbManager.getDynamicPropertiesStore().getTotalNetLimit();
+    long totalNetWeight = dbManager.getDynamicPropertiesStore().getTotalNetWeight();
+
+    Map<String, Long> assetNetLimitMap = new HashMap<>();
+    accountCapsule.getAllFreeAssetNetUsage().keySet().forEach(asset -> {
+      byte[] key = ByteArray.fromString(asset);
+      assetNetLimitMap.put(asset, dbManager.getAssetIssueStore().get(key).getFreeAssetNetLimit());
+    });
+
+    builder.setFreeNetUsed(accountCapsule.getFreeNetUsage())
+        .setFreeNetLimit(freeNetLimit)
+        .setNetUsed(accountCapsule.getNetUsage())
+        .setNetLimit(netLimit)
+        .setTotalNetLimit(totalNetLimit)
+        .setTotalNetWeight(totalNetWeight)
+        .putAllAssetNetUsed(accountCapsule.getAllFreeAssetNetUsage())
+        .putAllAssetNetLimit(assetNetLimitMap);
     return builder.build();
   }
 
@@ -338,16 +425,22 @@ public class Wallet {
     return builder.build();
   }
 
+  public NumberMessage getNextMaintenanceTime() {
+    NumberMessage.Builder builder = NumberMessage.newBuilder()
+        .setNum(dbManager.getDynamicPropertiesStore().getNextMaintenanceTime());
+    return builder.build();
+  }
+
   public Block getBlockById(ByteString BlockId) {
     if (Objects.isNull(BlockId)) {
       return null;
     }
-    Block blocke = null;
+    Block block = null;
     try {
-      blocke = dbManager.getBlockStore().get(BlockId.toByteArray()).getInstance();
+      block = dbManager.getBlockStore().get(BlockId.toByteArray()).getInstance();
     } catch (StoreException e) {
     }
-    return blocke;
+    return block;
   }
 
   public BlockList getBlocksByLimitNext(long number, long limit) {
@@ -371,12 +464,17 @@ public class Wallet {
     if (Objects.isNull(transactionId)) {
       return null;
     }
-    Transaction transaction = null;
-    TransactionCapsule transactionCapsule = dbManager.getTransactionStore()
-        .get(transactionId.toByteArray());
-    if (Objects.nonNull(transactionCapsule)) {
-      transaction = transactionCapsule.getInstance();
+    TransactionCapsule transactionCapsule = null;
+    try {
+      transactionCapsule = dbManager.getTransactionStore()
+          .get(transactionId.toByteArray());
+
+    } catch (BadItemException e) {
     }
-    return transaction;
+    if (transactionCapsule != null) {
+      return transactionCapsule.getInstance();
+    }
+    return null;
   }
+
 }

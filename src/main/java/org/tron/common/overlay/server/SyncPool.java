@@ -17,33 +17,50 @@
  */
 package org.tron.common.overlay.server;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.collect.Lists;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 import org.tron.common.overlay.client.PeerClient;
-import org.tron.common.overlay.discover.Node;
-import org.tron.common.overlay.discover.NodeHandler;
-import org.tron.common.overlay.discover.NodeManager;
+import org.tron.common.overlay.discover.node.Node;
+import org.tron.common.overlay.discover.node.NodeHandler;
+import org.tron.common.overlay.discover.node.NodeManager;
+import org.tron.common.overlay.discover.node.NodeStatistics;
 import org.tron.core.config.args.Args;
 import org.tron.core.net.peer.PeerConnection;
 import org.tron.core.net.peer.PeerConnectionDelegate;
-
-import java.util.*;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Predicate;
 
 @Component
 public class SyncPool {
 
   public static final Logger logger = LoggerFactory.getLogger("SyncPool");
 
-  private static final long WORKER_TIMEOUT = 15;
+  private static final double factor = 0.4;
+  private static final double activeFactor = 0.2;
 
-  private final List<PeerConnection> activePeers = Collections.synchronizedList(new ArrayList<PeerConnection>());
+  private final List<PeerConnection> activePeers = Collections
+      .synchronizedList(new ArrayList<PeerConnection>());
+  private final AtomicInteger passivePeersCount = new AtomicInteger(0);
+  private final AtomicInteger activePeersCount = new AtomicInteger(0);
+
+  private Cache<NodeHandler, Long> nodeHandlerCache = CacheBuilder.newBuilder()
+      .maximumSize(1000).expireAfterWrite(120, TimeUnit.SECONDS).recordStats().build();
 
   @Autowired
   private NodeManager nodeManager;
@@ -57,7 +74,9 @@ public class SyncPool {
 
   private Args args = Args.getInstance();
 
-  private int maxActiveNodes = args.getNodeMaxActiveNodes() > 0 ? args.getNodeMaxActiveNodes() : 30;
+  private int maxActiveNodes = args.getNodeMaxActiveNodes();
+
+  private int getMaxActivePeersWithSameIp = args.getNodeMaxActiveNodesWithSameIp();
 
   private ScheduledExecutorService poolLoopExecutor = Executors.newSingleThreadScheduledExecutor();
 
@@ -65,62 +84,63 @@ public class SyncPool {
 
   private PeerClient peerClient;
 
-  @Autowired
-  public SyncPool(PeerClient peerClient) {
-    this.peerClient = peerClient;
-  }
-
   public void init(PeerConnectionDelegate peerDel) {
     this.peerDel = peerDel;
 
     channelManager = ctx.getBean(ChannelManager.class);
 
+    peerClient = ctx.getBean(PeerClient.class);
+
+    for (Node node : args.getActiveNodes()) {
+      nodeManager.getNodeHandler(node).getNodeStatistics().setPredefined(true);
+    }
+
     poolLoopExecutor.scheduleWithFixedDelay(() -> {
       try {
         fillUp();
-        prepareActive();
       } catch (Throwable t) {
         logger.error("Exception in sync worker", t);
       }
-    }, WORKER_TIMEOUT, WORKER_TIMEOUT, TimeUnit.SECONDS);
+    }, 30, 16, TimeUnit.SECONDS);
 
     logExecutor.scheduleWithFixedDelay(() -> {
       try {
         logActivePeers();
-      } catch (Throwable t) {}
-    }, 10, 10, TimeUnit.SECONDS);
+      } catch (Throwable t) {
+      }
+    }, 30, 10, TimeUnit.SECONDS);
   }
 
   private void fillUp() {
-    int lackSize = maxActiveNodes - channelManager.getActivePeers().size();
-    if(lackSize <= 0) return;
+    int lackSize = Math.max((int) (maxActiveNodes * factor) - activePeers.size(),
+        (int) (maxActiveNodes * activeFactor - activePeersCount.get()));
+    if (lackSize <= 0) {
+      return;
+    }
 
-    final Set<String> nodesInUse = channelManager.nodesInUse();
+    final Set<String> nodesInUse = new HashSet<>();
+    channelManager.getActivePeers().forEach(channel -> nodesInUse.add(channel.getPeerId()));
     nodesInUse.add(nodeManager.getPublicHomeNode().getHexId());
 
     List<NodeHandler> newNodes = nodeManager.getNodes(new NodeSelector(nodesInUse), lackSize);
-    newNodes.forEach(n ->  peerClient.connectAsync(n.getNode().getHost(), n.getNode().getPort(),
-                n.getNode().getHexId(), false));
+    newNodes.forEach(n -> {
+      peerClient.connectAsync(n, false);
+      nodeHandlerCache.put(n, System.currentTimeMillis());
+    });
   }
 
-  private synchronized void prepareActive() {
-    for (Channel channel : channelManager.getActivePeers()) {
-      if (!activePeers.contains(channel)) {
-        activePeers.add((PeerConnection)channel);
-        peerDel.onConnectPeer((PeerConnection)channel);
-      }
-    }
-    activePeers.sort(Comparator.comparingDouble(c -> c.getPeerStats().getAvgLatency()));
+  // for test only
+  public void addActivePeers(PeerConnection p) {
+    activePeers.add(p);
   }
+
 
   synchronized void logActivePeers() {
-    logger.info("-------- active node {}", nodeManager.dumpActiveNodes().size());
-    nodeManager.dumpActiveNodes().forEach(handler -> logger.info("address: {}:{}, ID:{} {}",
-            handler.getNode().getHost(),handler.getNode().getPort(),handler.getNode().getHexIdShort(), handler.getNodeStatistics().toString()));
 
-    logger.info("-------- active channel {}, node in user size {}", channelManager.getActivePeers().size(),
-            channelManager.nodesInUse().size());
-    for (Channel channel: channelManager.getActivePeers()){
+    logger.info("-------- active connect channel {}", activePeersCount.get());
+    logger.info("-------- passive connect channel {}", passivePeersCount.get());
+    logger.info("-------- all connect channel {}", channelManager.getActivePeers().size());
+    for (Channel channel : channelManager.getActivePeers()) {
       logger.info(channel.toString());
     }
 
@@ -137,7 +157,7 @@ public class SyncPool {
       sb.append("============\n");
       for (Channel peer : new ArrayList<>(channelManager.getActivePeers())) {
         if (!activeSet.contains(peer.getNode())) {
-          sb.append(peer.logSyncStats()).append('\n');
+          sb.append(peer.getNode()).append('\n');
         }
       }
       logger.info(sb.toString());
@@ -145,14 +165,45 @@ public class SyncPool {
   }
 
   public synchronized List<PeerConnection> getActivePeers() {
-    return new ArrayList<>(activePeers);
+    List<PeerConnection> peers = Lists.newArrayList();
+    activePeers.forEach(peer -> {
+      if (!peer.isDisconnect()) {
+        peers.add(peer);
+      }
+    });
+    return peers;
+  }
+
+  public synchronized void onConnect(Channel peer) {
+    if (!activePeers.contains(peer)) {
+      if (!peer.isActive()) {
+        passivePeersCount.incrementAndGet();
+      } else {
+        activePeersCount.incrementAndGet();
+      }
+      activePeers.add((PeerConnection) peer);
+      activePeers.sort(Comparator.comparingDouble(c -> c.getPeerStats().getAvgLatency()));
+      peerDel.onConnectPeer((PeerConnection) peer);
+    }
   }
 
   public synchronized void onDisconnect(Channel peer) {
     if (activePeers.contains(peer)) {
+      if (!peer.isActive()) {
+        passivePeersCount.decrementAndGet();
+      } else {
+        activePeersCount.decrementAndGet();
+      }
       activePeers.remove(peer);
-      peerDel.onDisconnectPeer((PeerConnection)peer);
+      peerDel.onDisconnectPeer((PeerConnection) peer);
     }
+  }
+
+  public boolean isCanConnect() {
+    if (passivePeersCount.get() >= maxActiveNodes * (1 - activeFactor)) {
+      return false;
+    }
+    return true;
   }
 
   public void close() {
@@ -175,20 +226,31 @@ public class SyncPool {
     @Override
     public boolean test(NodeHandler handler) {
 
-//      if (!nodeManager.isNodeAlive(handler)){
-//        return false;
-//      }
-
       if (handler.getNode().getHost().equals(nodeManager.getPublicHomeNode().getHost()) &&
-              handler.getNode().getPort() == nodeManager.getPublicHomeNode().getPort()) {
+          handler.getNode().getPort() == nodeManager.getPublicHomeNode().getPort()) {
         return false;
       }
 
-      if (channelManager.isRecentlyDisconnected(handler.getInetSocketAddress().getAddress())){
-          return false;
+      if (nodesInUse != null && nodesInUse.contains(handler.getNode().getHexId())) {
+        return false;
       }
 
-      if (nodesInUse != null && nodesInUse.contains(handler.getNode().getHexId())) {
+      if (handler.getNodeStatistics().getReputation() >= NodeStatistics.REPUTATION_PREDEFINED){
+        return true;
+      }
+
+      InetAddress inetAddress = handler.getInetSocketAddress().getAddress();
+      if (channelManager.getRecentlyDisconnected().getIfPresent(inetAddress) != null) {
+        return false;
+      }
+      if (channelManager.getBadPeers().getIfPresent(inetAddress) != null) {
+        return false;
+      }
+      if (channelManager.getConnectionNum(inetAddress) >= getMaxActivePeersWithSameIp){
+        return false;
+      }
+
+      if (nodeHandlerCache.getIfPresent(handler) != null) {
         return false;
       }
 
@@ -196,7 +258,7 @@ public class SyncPool {
         return false;
       }
 
-      return  true;
+      return true;
     }
   }
 

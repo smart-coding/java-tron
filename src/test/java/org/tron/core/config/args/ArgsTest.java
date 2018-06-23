@@ -16,10 +16,13 @@
 package org.tron.core.config.args;
 
 import com.google.common.collect.Lists;
+import io.grpc.internal.GrpcUtil;
+import io.grpc.netty.NettyServerBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
+import org.tron.core.Constant;
 
 @Slf4j
 public class ArgsTest {
@@ -31,10 +34,10 @@ public class ArgsTest {
 
   @Test
   public void get() {
-    Args.setParam(new String[]{"-w"}, "configFile/config-junit.conf");
+    Args.setParam(new String[]{"-w"}, Constant.TEST_CONF);
 
     Args args = Args.getInstance();
-    Assert.assertEquals("configFile-test", args.getStorage().getDirectory());
+    Assert.assertEquals("database", args.getStorage().getDbDirectory());
 
     Assert.assertEquals(11, args.getSeedNode().getIpList().size());
 
@@ -57,12 +60,20 @@ public class ArgsTest {
     Assert.assertTrue(args.isNodeDiscoveryPersist());
     Assert.assertEquals("127.0.0.1", args.getNodeDiscoveryBindIp());
     Assert.assertEquals("46.168.1.1", args.getNodeExternalIp());
-    Assert.assertEquals(10002, args.getNodeListenPort());
+    Assert.assertEquals(18888, args.getNodeListenPort());
     Assert.assertEquals(2000, args.getNodeConnectionTimeout());
-    Assert.assertEquals(0, args.getNodeActive().size());
+    Assert.assertEquals(0, args.getActiveNodes().size());
     Assert.assertEquals(30, args.getNodeMaxActiveNodes());
-    Assert.assertEquals(0, args.getNodeP2pVersion());
+    Assert.assertEquals(43, args.getNodeP2pVersion());
     //Assert.assertEquals(30, args.getSyncNodeCount());
 
+    // gRPC network configs checking
+    Assert.assertEquals(50051, args.getRpcPort());
+    Assert.assertEquals(Integer.MAX_VALUE, args.getMaxConcurrentCallsPerConnection());
+    Assert.assertEquals(NettyServerBuilder.DEFAULT_FLOW_CONTROL_WINDOW, args.getFlowControlWindow());
+    Assert.assertEquals(60000L, args.getMaxConnectionIdleInMillis());
+    Assert.assertEquals(Long.MAX_VALUE, args.getMaxConnectionAgeInMillis());
+    Assert.assertEquals(GrpcUtil.DEFAULT_MAX_MESSAGE_SIZE, args.getMaxMessageSize());
+    Assert.assertEquals(GrpcUtil.DEFAULT_MAX_HEADER_LIST_SIZE, args.getMaxHeaderListSize());
   }
 }
